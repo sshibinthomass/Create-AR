@@ -1,0 +1,20 @@
+# 3D model files are fixtures: keep them byte-exact across platforms.
+# STEP/IGES/OBJ/USDA are technically text, but IGES uses fixed-width 80-column
+# records and all of these are compared byte-for-byte in tests, so none of them
+# should have their line endings rewritten on checkout.
+*.step  binary
+*.stp   binary
+*.iges  binary
+*.igs   binary
+*.obj   binary
+*.mtl   binary
+*.usda  binary
+*.gltf  binary
+*.stl   binary
+*.ply   binary
+*.glb   binary
+*.fbx   binary
+*.abc   binary
+*.usdc  binary
+*.usdz  binary
+*.blend binary
