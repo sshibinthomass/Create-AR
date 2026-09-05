@@ -60,6 +60,18 @@ button:disabled { cursor: not-allowed; }
 .badge.bad .dot { background: var(--err); }
 .badge.bad { color: var(--err); border-color: rgba(242, 85, 90, 0.35); }
 
+.tabs { display: flex; gap: 4px; padding: 3px; border-radius: 9px; background: var(--panel-2); border: 1px solid var(--line); }
+.tab {
+  padding: 5px 12px; border-radius: 7px; border: none; background: none;
+  color: var(--muted); font-size: 13px; font-weight: 550;
+  transition: background .12s, color .12s;
+}
+.tab:hover { color: var(--text); }
+.tab.sel { background: var(--accent-soft); color: var(--accent); }
+
+.view { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+.view[hidden] { display: none; }
+
 .layout {
   flex: 1;
   display: grid;
@@ -239,6 +251,82 @@ input[type='range'] { width: 110px; accent-color: var(--accent); }
   position: absolute; left: 12px; bottom: 10px;
   font-size: 11px; color: var(--dim); pointer-events: none;
 }
+
+/* ---------- exploded view ---------- */
+
+.explode-btn {
+  position: absolute; top: 10px; right: 10px;
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 6px 11px; border-radius: 8px;
+  background: rgba(18, 21, 29, .82); border: 1px solid var(--line);
+  color: var(--muted); font-size: 12px; backdrop-filter: blur(6px);
+  transition: color .12s, border-color .12s, background .12s;
+}
+.explode-btn:hover { color: var(--text); border-color: #38405a; }
+.explode-btn.on { color: var(--accent); border-color: var(--accent); background: rgba(91, 140, 255, .14); }
+
+.explode-panel {
+  position: absolute; right: 10px; bottom: 10px; width: 232px;
+  padding: 10px 12px 9px; border-radius: 10px;
+  background: rgba(18, 21, 29, .88); border: 1px solid var(--line);
+  backdrop-filter: blur(6px);
+}
+.explode-head {
+  display: flex; align-items: baseline; justify-content: space-between; gap: 8px;
+  font-size: 12px; color: var(--text); margin-bottom: 7px;
+}
+.explode-head span:last-child { color: var(--dim); font-size: 11px; }
+.explode-panel input[type='range'] { width: 100%; display: block; }
+.explode-panel input[type='range']:disabled { opacity: .4; }
+.explode-foot {
+  display: flex; justify-content: space-between; gap: 6px;
+  margin-top: 3px; font-size: 10px; color: var(--dim);
+}
+.explode-foot span:nth-child(2) { color: var(--accent); font-variant-numeric: tabular-nums; }
+.explode-note { margin-top: 5px; font-size: 11px; color: var(--dim); line-height: 1.45; }
+.explode-names {
+  display: flex; align-items: center; gap: 6px;
+  margin-top: 8px; font-size: 11px; color: var(--muted); cursor: pointer;
+}
+.explode-names input { accent-color: var(--accent); margin: 0; }
+
+.part-label {
+  padding: 2px 7px; border-radius: 999px; white-space: nowrap;
+  max-width: 320px; overflow: hidden; text-overflow: ellipsis;
+  background: rgba(11, 13, 18, .78); border: 1px solid var(--line);
+  color: var(--muted); font-size: 11px; user-select: none;
+  transform: translateY(-2px);
+}
+.part-label.on { color: #fff; background: var(--accent); border-color: var(--accent); }
+
+/* ---------- part list ---------- */
+
+.parts { display: flex; flex-direction: column; max-height: 320px; overflow-y: auto; }
+.part-row {
+  display: flex; align-items: center; gap: 9px;
+  padding: 6px 16px; border-top: 1px solid var(--line-soft);
+  cursor: pointer;
+}
+.part-row:hover { background: var(--panel-2); }
+.part-row.on { background: var(--accent-soft); box-shadow: inset 2px 0 0 var(--accent); }
+.part-row.on .part-n { color: var(--accent); }
+.part-n {
+  flex: none; width: 20px; text-align: right;
+  font-size: 11px; color: var(--dim); font-variant-numeric: tabular-nums;
+}
+.part-row input {
+  flex: 1; min-width: 0; width: auto;
+  background: var(--panel-2); border: 1px solid var(--line); color: var(--text);
+  border-radius: 7px; padding: 5px 8px; font: inherit; font-size: 13px;
+}
+.part-row input:focus { outline: none; border-color: var(--accent); }
+.part-undo {
+  flex: none; background: none; border: none; color: var(--dim);
+  padding: 2px 5px; border-radius: 6px; font-size: 14px; line-height: 1;
+}
+.part-undo:hover { color: var(--accent); background: var(--panel-2); }
+
+.head-note { margin-left: auto; font-size: 11px; color: var(--accent); }
 
 /* ---------- stats ---------- */
 

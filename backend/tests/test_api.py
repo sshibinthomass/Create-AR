@@ -5,6 +5,7 @@ from __future__ import annotations
 import io
 import json
 import os
+import struct
 import time
 import zipfile
 from pathlib import Path
@@ -13,6 +14,8 @@ import pytest
 from fastapi.testclient import TestClient
 
 os.environ.setdefault("CONVERTER_DATA_DIR", str(Path(__file__).parent / "_data"))
+
+from pydantic import ValidationError  # noqa: E402
 
 from app import config, formats  # noqa: E402
 from app.main import app, safe_stem  # noqa: E402
@@ -110,6 +113,16 @@ def test_unknown_job_is_404():
 
 # --- conversions -------------------------------------------------------------
 
+def await_job(job_id: str, timeout: float = 240.0) -> dict:
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        job = client.get(f"/api/jobs/{job_id}").json()
+        if job["status"] in {"done", "error"}:
+            return job
+        time.sleep(0.4)
+    pytest.fail(f"job {job_id} did not finish within {timeout}s")
+
+
 def run_job(filename: str, payload: bytes, target: str, options: dict | None = None,
             timeout: float = 240.0) -> dict:
     r = client.post(
@@ -118,15 +131,15 @@ def run_job(filename: str, payload: bytes, target: str, options: dict | None = N
         data={"target": target, "options": json.dumps(options or {})},
     )
     assert r.status_code == 202, r.text
-    job_id = r.json()["id"]
+    return await_job(r.json()["id"], timeout)
 
-    deadline = time.time() + timeout
-    while time.time() < deadline:
-        job = client.get(f"/api/jobs/{job_id}").json()
-        if job["status"] in {"done", "error"}:
-            return job
-        time.sleep(0.4)
-    pytest.fail(f"job {job_id} did not finish within {timeout}s")
+
+def glb_node_names(data: bytes) -> list[str]:
+    """Node names out of a GLB's JSON chunk, which is where part names land."""
+    assert data[:4] == b"glTF", "not a GLB"
+    length = struct.unpack("<I", data[12:16])[0]
+    doc = json.loads(data[20:20 + length])
+    return [n.get("name", "") for n in doc.get("nodes", [])]
 
 
 @needs_blender
@@ -292,3 +305,52 @@ def test_download_before_completion_is_rejected():
     job_id = r.json()["id"]
     dl = client.get(f"/api/jobs/{job_id}/download")
     assert dl.status_code in {200, 409}  # 409 while queued/running, 200 if already done
+
+
+# --- part names --------------------------------------------------------------
+
+def test_reexport_of_an_unknown_job_is_404():
+    r = client.post("/api/jobs/deadbeef/reexport", data={"target": ".glb"})
+    assert r.status_code == 404
+
+
+def test_rename_values_are_cleaned_and_capped():
+    from app.main import Options
+
+    opts = Options(renames={"a": "  Front   Panel \n", "b": "b", "c": ""})
+    # Whitespace collapses; a no-op rename and an empty name are dropped.
+    assert opts.renames == {"a": "Front Panel"}
+
+    with pytest.raises(ValidationError):
+        Options(renames={str(i): f"n{i}" for i in range(501)})
+
+
+@needs_blender
+def test_reexport_renames_parts_in_the_output():
+    job = run_job("cube.stl", CUBE_STL.read_bytes(), ".glb")
+    assert job["status"] == "done", job["error"]
+    names = glb_node_names(client.get(f"/api/jobs/{job['id']}/download").content)
+    assert names, "nothing in the GLB carries a name"
+
+    r = client.post(
+        f"/api/jobs/{job['id']}/reexport",
+        data={"target": ".glb",
+              "options": json.dumps({"renames": {names[0]: "Housing"}})},
+    )
+    assert r.status_code == 202, r.text
+    again = await_job(r.json()["id"])
+    assert again["status"] == "done", again["error"]
+    assert again["id"] != job["id"], "re-export must not overwrite the original job"
+    assert "Housing" in glb_node_names(
+        client.get(f"/api/jobs/{again['id']}/download").content)
+
+
+@needs_blender
+def test_reexport_can_change_format_at_the_same_time():
+    job = run_job("cube.stl", CUBE_STL.read_bytes(), ".glb")
+    r = client.post(f"/api/jobs/{job['id']}/reexport",
+                    data={"target": ".usdz", "options": "{}"})
+    assert r.status_code == 202, r.text
+    again = await_job(r.json()["id"])
+    assert again["status"] == "done", again["error"]
+    assert again["downloadName"].endswith(".usdz"), again["downloadName"]

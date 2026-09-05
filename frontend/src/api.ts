@@ -69,6 +69,8 @@ export interface ConvertOptions {
   cad_tolerance: number
   /** Path inside an archive, when the auto-picked model is not the wanted one. */
   archive_entry?: string
+  /** Old part name -> new part name, written into the exported file. */
+  renames?: Record<string, string>
 }
 
 export const DEFAULT_OPTIONS: ConvertOptions = {
@@ -102,6 +104,19 @@ export const getCapabilities = () => fetch('/api/formats').then(json<Capabilitie
 export const getJob = (id: string) => fetch(`/api/jobs/${id}`).then(json<Job>)
 export const downloadUrl = (id: string) => `/api/jobs/${id}/download`
 export const previewUrl = (id: string) => `/api/jobs/${id}/preview`
+
+/**
+ * Convert a finished job's original upload again, with different options.
+ *
+ * Used to save renamed parts: the model is already on the server, so there is
+ * no reason to push the whole thing back up it.
+ */
+export function reexportJob(jobId: string, target: string, options: ConvertOptions): Promise<Job> {
+  const form = new FormData()
+  form.append('target', target)
+  form.append('options', JSON.stringify(options))
+  return fetch(`/api/jobs/${jobId}/reexport`, { method: 'POST', body: form }).then(json<Job>)
+}
 
 export function startConversion(
   file: File,

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -11,7 +12,7 @@ from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, Field, ValidationError, field_validator
 
 from . import config, formats
 from .jobs import new_job_dir, store
@@ -32,6 +33,8 @@ app.add_middleware(
 )
 
 CHUNK = 1024 * 1024
+MAX_RENAMES = 500
+MAX_NAME_LEN = 120
 _SAFE_STEM = re.compile(r"[^A-Za-z0-9._-]+")
 
 
@@ -52,6 +55,23 @@ class Options(BaseModel):
     cad_angular_tolerance: float = Field(0.5, gt=0, le=5)
     # Path inside an uploaded archive, when the auto-picked model is not wanted.
     archive_entry: str = Field("", max_length=512)
+    # Old object name -> new object name, applied between import and export.
+    renames: dict[str, str] = Field(default_factory=dict)
+
+    @field_validator("renames")
+    @classmethod
+    def _clean_renames(cls, value: dict[str, str]) -> dict[str, str]:
+        if len(value) > MAX_RENAMES:
+            raise ValueError(f"at most {MAX_RENAMES} renames per job")
+        cleaned: dict[str, str] = {}
+        for old, new in value.items():
+            # Collapse whitespace and drop control characters: these names end
+            # up in glTF nodes, USD prims and OBJ groups.
+            name = " ".join(str(new).split())[:MAX_NAME_LEN]
+            name = "".join(ch for ch in name if ch.isprintable())
+            if name and name != old:
+                cleaned[str(old)[:MAX_NAME_LEN]] = name
+        return cleaned
 
 
 def safe_stem(filename: str) -> str:
@@ -133,7 +153,6 @@ async def create_conversion(
                     )
                 fh.write(chunk)
     except HTTPException:
-        import shutil
         shutil.rmtree(config.JOBS_DIR / job_id, ignore_errors=True)
         raise
 
@@ -155,6 +174,40 @@ def get_job(job_id: str) -> dict:
     if job is None:
         raise HTTPException(404, "Job not found or expired.")
     return job.public()
+
+
+@app.post("/api/jobs/{job_id}/reexport")
+def reexport(job_id: str, target: str = Form(...), options: str = Form("{}")) -> JSONResponse:
+    """Convert a finished job's *original* upload again, with new options.
+
+    Renaming parts and saving to another format would otherwise mean uploading
+    the same model a second time, which for a large assembly is the slowest part
+    of the whole exchange. The source is copied into the new job so the two are
+    independent: either one can be swept by the TTL without hurting the other.
+    """
+    job = store.get(job_id)
+    if job is None:
+        raise HTTPException(404, "Job not found or expired.")
+
+    target_ext = formats.canonical(target)
+    if not formats.is_supported_output(target_ext):
+        raise HTTPException(400, f"'{target}' is not a supported output format.")
+
+    try:
+        opts = Options(**json.loads(options or "{}"))
+    except (json.JSONDecodeError, ValidationError) as exc:
+        raise HTTPException(400, f"Invalid options: {exc}") from exc
+
+    sources = sorted(p for p in (config.JOBS_DIR / job_id / "source").glob("*") if p.is_file())
+    if not sources:
+        raise HTTPException(410, "The original upload is no longer available.")
+
+    _, source_dir = new_job_dir()
+    dest = source_dir / sources[0].name
+    shutil.copyfile(sources[0], dest)
+
+    new_job = store.submit(dest, job.filename, target_ext, opts.model_dump())
+    return JSONResponse(new_job.public(), status_code=202)
 
 
 @app.get("/api/jobs/{job_id}/download")

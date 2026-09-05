@@ -1,7 +1,9 @@
 # Create-AR — 3D Model Converter
 
 Upload a 3D model, pick a target format, get it back converted — with a live 3D
-preview of the result in the browser.
+preview of the result in the browser, and an Analysis tab that pulls a model
+apart into an exploded view, names every part, and saves it back out with the
+names you gave them.
 
 Conversion is done by a **headless Blender** process on the machine running the
 backend. CAD formats (STEP/IGES) are tessellated with **OpenCASCADE** first,
@@ -14,7 +16,7 @@ This is the `Convert` stage of the larger Create-AR Studio pipeline.
 ![React](https://img.shields.io/badge/React-18-61dafb)
 ![FastAPI](https://img.shields.io/badge/FastAPI-0.141-009688)
 ![Blender](https://img.shields.io/badge/Blender-5.2_LTS-f5792a)
-![Tests](https://img.shields.io/badge/tests-56_passing-3ecf8e)
+![Tests](https://img.shields.io/badge/tests-60_passing-3ecf8e)
 
 ---
 
@@ -75,6 +77,53 @@ Three details that matter in practice:
   rather than extension, the model is found anywhere in the tree, and nested
   archives are opened recursively — including mixed `.zip` → `.tar.gz` → `.zip`
   chains. Every candidate is reported and the pick can be overridden.
+
+---
+
+## Exploded view and part names
+
+Any preview can be taken apart. **Separate parts** in the top-right corner of
+the viewer opens a slider that moves every part outward from the centre of the
+assembly, proportionally to how far off-centre it already sits — so the
+arrangement stays recognisable instead of flying into an even starburst. Closing
+the panel puts the model back together.
+
+The **Analysis** tab is built around that view: drop a model in and it goes
+straight to the exploded viewer, with every part listed down the side. Click a
+part — in the viewer or in the list — and that one is named on the model and
+outlined, with its row scrolled into view; click the background to drop the
+selection. Only the selected part is labelled, because a real assembly has
+hundreds of parts and naming them all at once buries the model (there is a
+checkbox for it anyway, for small models). Edit a name in the list and the
+label follows it. Pick a format, press **Save as**, and the model is written out
+with the new names. Anything the converter can read works, so an FBX, a STEP
+assembly or a zipped OBJ can all be taken apart and relabelled.
+
+Saving does not re-upload: the server still has the model from the analysis
+pass, so only the names travel. Names are applied to the Blender objects between
+import and export, which is what glTF nodes, USD prims, FBX objects and OBJ
+groups are all written from. **STL and PLY store a single unnamed mesh**, so
+names cannot survive a save to those; the UI says so before you press the
+button. (OBJ has no quoting, so `Top Cover` is written as `Top_Cover`.)
+
+Three details worth knowing:
+
+- **Parts are the ones the model was authored with.** The viewer descends past
+  wrapper nodes to the level that actually holds more than one object. A model
+  exported as a single merged mesh has no parts to separate, and says so rather
+  than pretending otherwise.
+- **Parts sitting at the centre still come out.** A core inside a housing has no
+  outward direction of its own and would stay buried however far the slider goes,
+  so anything nearer the centre than its own size is given a direction from an
+  evenly spread set.
+
+- **Names come from the model, not from the viewer.** They are the object names
+  the exporter wrote, so what you rename is the thing the next tool downstream
+  will show. The outline is drawn without depth testing, so a part selected
+  from the list is still visible when it sits inside another one.
+
+Separation is applied in the browser, to the preview GLB, and is only a way of
+looking at the model — it never moves anything in the file you download.
 
 ---
 
@@ -284,6 +333,7 @@ receive traffic.
 | `GET` | `/api/formats` | Capability matrix that drives the UI. |
 | `POST` | `/api/convert` | multipart: `file`, `target`, `options` → `202` + job. |
 | `GET` | `/api/jobs/{id}` | Status, progress, stats, log. |
+| `POST` | `/api/jobs/{id}/reexport` | Convert the same upload again: `target`, `options`. |
 | `GET` | `/api/jobs/{id}/download` | The converted file (or a zip). |
 | `GET` | `/api/jobs/{id}/preview` | GLB used by the in-browser viewer. |
 
@@ -295,8 +345,9 @@ curl -F file=@part.stp -F target=.usdz \
 
 Conversion options: `scale`, `center` (`none`/`origin`/`floor`), `decimate`,
 `triangulate`, `apply_modifiers`, `animations`, `draco` (GLB), `y_up`
-(USD/USDZ), `cad_tolerance` (STEP/IGES), and `archive_entry` to pick a specific
-model inside an archive.
+(USD/USDZ), `cad_tolerance` (STEP/IGES), `archive_entry` to pick a specific
+model inside an archive, and `renames` — a `{"old": "new"}` map of part names,
+applied between import and export.
 
 ## Sample models
 
@@ -310,13 +361,13 @@ for STEP/IGES. Drag any of them onto the upload area.
 .venv/Scripts/python -m pytest backend/tests -q
 ```
 
-56 tests: format and alias resolution, upload validation, filename
+60 tests: format and alias resolution, upload validation, filename
 sanitisation, archive extraction safety (zip-slip, symlinks, entry floods,
 decompression bombs), model discovery across container formats and nesting
 depths, texture relinking, and real Blender conversions — STL to every headline
 target, STEP → USDZ, zipped OBJ with materials, USDZ archive spec compliance,
-and scale/centre correctness. Conversion tests skip automatically when Blender
-is absent.
+scale/centre correctness, and part renaming through a re-export. Conversion
+tests skip automatically when Blender is absent.
 
 ## Project layout
 
@@ -329,7 +380,9 @@ backend/app/
   jobs.py          in-memory job store + worker pool
   main.py          FastAPI routes
 frontend/src/
-  App.tsx          upload → format → options → result flow
-  components/      Dropzone, OptionsPanel, ModelViewer (three.js)
+  App.tsx          shell: health/capabilities and the two tabs
+  useConversion.ts upload + job polling, shared by both tabs
+  views/           ConvertView (format → options → result), AnalysisView
+  components/      Dropzone, OptionsPanel, ModelViewer (three.js + explode)
 docs/FORMATS.md    what each engine actually provides, and why
 ```

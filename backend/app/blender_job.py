@@ -275,6 +275,28 @@ def apply_center(mode):
     bpy.context.view_layer.update()
 
 
+def apply_renames(mapping):
+    """Rename objects before export, so the names travel into the output file.
+
+    glTF nodes, USD prims, FBX objects and OBJ groups are all written from the
+    object name; STL and PLY carry no per-part names at all. The mesh datablock
+    is renamed alongside when nothing else shares it, because some exporters
+    prefer it over the object name.
+    """
+    if not mapping:
+        return 0
+    done = 0
+    for old_name, new_name in mapping.items():
+        ob = bpy.data.objects.get(old_name)
+        if ob is None or not new_name or new_name == old_name:
+            continue
+        ob.name = new_name
+        if ob.data is not None and ob.data.users == 1:
+            ob.data.name = new_name
+        done += 1
+    return done
+
+
 def apply_triangulate():
     for ob in bpy.data.objects:
         if ob.type == "MESH":
@@ -326,6 +348,10 @@ def main():
         emit("info", message="Relinked " + str(relinked) + " texture(s) by filename")
 
     emit("stats", source=scene_stats())
+
+    renamed = apply_renames(o.get("renames") or {})
+    if renamed:
+        emit("info", message="Renamed " + str(renamed) + " part(s)")
 
     emit("progress", pct=45, step="Transforming")
     apply_scale(float(o.get("scale", 1.0)))
