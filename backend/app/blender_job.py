@@ -194,6 +194,48 @@ def scene_stats():
     }
 
 
+def relink_missing_textures(search_root):
+    """Repoint textures whose recorded path does not exist onto files we do have.
+
+    Distributed archives very often carry absolute paths from the original
+    author's machine (``map_Kd C:/foo_baseColor.jpeg``) while shipping the actual
+    images in a sibling ``textures/`` folder. Without this the model converts
+    untextured, which looks like a conversion bug but is a defect in the source.
+    Matching is by filename, so it only ever rebinds an image to a file of the
+    same name that really is in the upload.
+    """
+    if not search_root or not os.path.isdir(search_root):
+        return 0
+
+    index = {}
+    for dirpath, _, filenames in os.walk(search_root):
+        for name in filenames:
+            # First match wins; shallower directories are walked first.
+            index.setdefault(name.lower(), os.path.join(dirpath, name))
+
+    fixed = 0
+    for img in bpy.data.images:
+        if img.source != "FILE" or img.packed_file:
+            continue
+        raw = img.filepath or ""
+        if not raw:
+            continue
+        current = bpy.path.abspath(raw)
+        if current and os.path.exists(current):
+            continue
+        base = os.path.basename(raw.replace("\\", "/")).lower()
+        hit = index.get(base)
+        if not hit:
+            continue
+        img.filepath = hit
+        try:
+            img.reload()
+            fixed += 1
+        except Exception:
+            pass
+    return fixed
+
+
 def transform_roots(fn):
     """Apply ``fn`` to every root object (children follow via parenting)."""
     for ob in bpy.data.objects:
@@ -278,6 +320,10 @@ def main():
     if not bpy.data.objects:
         emit("error", message="import produced an empty scene")
         sys.exit(3)
+
+    relinked = relink_missing_textures(cfg.get("texture_root"))
+    if relinked:
+        emit("info", message="Relinked " + str(relinked) + " texture(s) by filename")
 
     emit("stats", source=scene_stats())
 

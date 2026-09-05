@@ -10,7 +10,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
 
-from . import config, formats
+from . import archives, config, formats
+from .archives import ArchiveError
 
 ProgressFn = Callable[[int, str], None]
 LogFn = Callable[[str], None]
@@ -105,6 +106,8 @@ def run_blender(cfg_path: Path, on_progress: ProgressFn, on_log: LogFn) -> dict:
                 on_progress(int(payload.get("pct", 0)), payload.get("step", ""))
             elif kind == "stats":
                 collected["stats"].update(payload)
+            elif kind == "info":
+                on_log(payload.get("message", ""))
             elif kind == "warn":
                 collected["warnings"].append(payload.get("message", ""))
                 on_log("warning: " + payload.get("message", ""))
@@ -162,6 +165,23 @@ def convert(
     work.mkdir(parents=True, exist_ok=True)
     out_dir.mkdir(parents=True, exist_ok=True)
 
+    stem_override: str | None = None
+    texture_root: Path | None = None
+    if src_ext in formats.ARCHIVE_EXTS:
+        on_progress(4, "Unpacking archive")
+        try:
+            source, notes = archives.extract_model(source, work)
+        except ArchiveError as exc:
+            raise ConversionError(str(exc)) from exc
+        for note in notes:
+            on_log(note)
+        # Name the download after the model inside, not "archive.glb".
+        stem_override = source.stem
+        texture_root = work / "archive"
+        src_ext = formats.canonical(source.suffix)
+        if not formats.is_supported_input(src_ext):
+            raise ConversionError(f"'{src_ext}' inside the archive is not a supported input.")
+
     blender_input = source
     if src_ext in formats.CAD_EXTS:
         on_progress(5, f"Tessellating {src_ext.upper().lstrip('.')} geometry")
@@ -170,7 +190,7 @@ def convert(
         tessellate_cad(source, blender_input, options)
         on_log(f"OpenCASCADE: produced {blender_input.stat().st_size} bytes of GLB")
 
-    stem = source.stem or "model"
+    stem = stem_override or source.stem or "model"
     primary = out_dir / f"{stem}{target_ext}"
     preview = job_dir / "preview.glb"
 
@@ -180,6 +200,7 @@ def convert(
         "output": str(primary),
         "output_ext": target_ext,
         "preview": str(preview),
+        "texture_root": str(texture_root) if texture_root else None,
         "options": options,
     }
     cfg_path = work / "config.json"

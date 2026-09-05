@@ -194,6 +194,95 @@ def test_corrupt_cad_file_fails_with_a_clear_message():
     assert "STEP" in job["error"]
 
 
+@needs_blender
+def test_zip_archive_converts_and_keeps_sidecar_materials():
+    """A zipped OBJ+MTL must convert *with* materials -- that is the point of
+    accepting archives, since a bare .obj loses them."""
+    obj = b"mtllib box.mtl\nusemtl Red\nv 0 0 0\nv 1 0 0\nv 1 1 0\nf 1 2 3\n"
+    mtl = b"newmtl Red\nKd 0.9 0.1 0.1\n"
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        zf.writestr("box.obj", obj)
+        zf.writestr("box.mtl", mtl)
+
+    job = run_job("bundle.zip", buf.getvalue(), ".glb")
+    assert job["status"] == "done", job["error"]
+    assert job["resultStats"]["materials"] >= 1, "material from the .mtl was lost"
+    # Downloads are named after the model inside, not the archive.
+    assert job["downloadName"] == "box.glb"
+    assert client.get(f"/api/jobs/{job['id']}/download").status_code == 200
+
+
+@needs_blender
+def test_zip_without_a_model_fails_with_a_clear_message():
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        zf.writestr("readme.txt", b"nothing to convert here")
+    job = run_job("empty.zip", buf.getvalue(), ".glb")
+    assert job["status"] == "error"
+    assert "No convertible model" in job["error"]
+
+
+def _tiny_png() -> bytes:
+    """Smallest valid 1x1 PNG."""
+    import base64
+    return base64.b64decode(
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="
+    )
+
+
+def _glb_images(payload: bytes) -> list:
+    """Read the image list out of a GLB's JSON chunk."""
+    import struct
+    json_len = struct.unpack_from("<I", payload, 12)[0]
+    doc = json.loads(payload[20:20 + json_len].decode("utf-8"))
+    return doc.get("images", [])
+
+
+@needs_blender
+def test_textures_are_relinked_when_the_mtl_has_absolute_paths():
+    """Marketplace archives routinely ship an .mtl full of the author's own
+    absolute paths while the images sit in a sibling textures/ folder. Those
+    must still make it into the output."""
+    obj = b"mtllib m.mtl\nusemtl T\nv 0 0 0\nv 1 0 0\nv 1 1 0\nvt 0 0\nvt 1 0\nvt 1 1\nf 1/1 2/2 3/3\n"
+    mtl = b"newmtl T\nKd 1 1 1\nmap_Kd C:/Users/someone/desktop/albedo.png\n"
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        zf.writestr("source/thing.obj", obj)
+        zf.writestr("source/m.mtl", mtl)
+        zf.writestr("textures/albedo.png", _tiny_png())
+
+    job = run_job("relink.zip", buf.getvalue(), ".glb")
+    assert job["status"] == "done", job["error"]
+    assert any("Relinked" in line for line in job["log"]), job["log"][-15:]
+
+    payload = client.get(f"/api/jobs/{job['id']}/download").content
+    assert _glb_images(payload), "texture was not carried into the GLB"
+
+
+@needs_blender
+def test_relinking_never_binds_a_differently_named_image():
+    """Matching is by exact filename so a wrong texture is never substituted."""
+    obj = b"mtllib m.mtl\nusemtl T\nv 0 0 0\nv 1 0 0\nv 1 1 0\nf 1 2 3\n"
+    mtl = b"newmtl T\nKd 1 1 1\nmap_Kd C:/nope/missing.png\n"
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        zf.writestr("thing.obj", obj)
+        zf.writestr("m.mtl", mtl)
+        zf.writestr("textures/something_else.png", _tiny_png())
+
+    job = run_job("norelink.zip", buf.getvalue(), ".glb")
+    assert job["status"] == "done", job["error"]
+    payload = client.get(f"/api/jobs/{job['id']}/download").content
+    assert not _glb_images(payload), "an unrelated image was bound to the material"
+
+
+def test_zip_is_advertised_as_input_only():
+    body = client.get("/api/formats").json()
+    assert ".zip" in body["inputs"]
+    assert ".zip" not in body["outputs"]
+
+
 def test_download_before_completion_is_rejected():
     r = client.post(
         "/api/convert",

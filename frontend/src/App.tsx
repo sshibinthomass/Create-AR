@@ -77,6 +77,7 @@ export default function App() {
   }, [file, caps])
 
   const isCadInput = sourceExt === '.step' || sourceExt === '.iges'
+  const isArchiveInput = sourceExt === '.zip'
   const busy = uploading || (job != null && ACTIVE.has(job.status))
   const canConvert = !!file && !!health?.ok && !busy && sourceExt !== target
 
@@ -143,6 +144,12 @@ export default function App() {
               {isCadInput && (
                 <div className="note">
                   CAD B-rep is tessellated with OpenCASCADE before Blender sees it.
+                </div>
+              )}
+              {isArchiveInput && (
+                <div className="note">
+                  The model is found inside the archive automatically, textures and
+                  sidecars included — so a zipped OBJ keeps its materials.
                 </div>
               )}
             </div>

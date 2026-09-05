@@ -57,6 +57,11 @@ FORMATS: tuple[Format, ...] = (
            "model/step", "B-rep is tessellated on import; tolerance is adjustable."),
     Format(".iges", "IGES", "cad", "opencascade", True, False,
            "model/iges", "B-rep is tessellated on import; tolerance is adjustable."),
+
+    # --- archive (a bundle of one of the above plus its textures) ---
+    Format(".zip", "Zip archive", "archive", "archive", True, False,
+           "application/zip",
+           "Model plus its textures and sidecars. The model is found automatically."),
 )
 
 BY_EXT: dict[str, Format] = {f.ext: f for f in FORMATS}
@@ -68,6 +73,7 @@ ALIASES: dict[str, str] = {
 }
 
 CAD_EXTS = {f.ext for f in FORMATS if f.category == "cad"}
+ARCHIVE_EXTS = {f.ext for f in FORMATS if f.category == "archive"}
 
 # Output formats that fan out into several files and must be zipped.
 MULTIFILE_EXTS = {".obj", ".gltf"}

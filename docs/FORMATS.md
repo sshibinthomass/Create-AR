@@ -97,3 +97,60 @@ test suite:
 `.obj` emits `.obj` + `.mtl` + copied textures, and `.gltf` (separate) emits
 `.gltf` + `.bin` + textures. Both are zipped before download; single-file
 targets are served as-is with their proper MIME type.
+
+## Archives as input
+
+A `.zip` upload is unpacked and the model inside is converted. This matters
+beyond convenience: OBJ keeps its materials in a sidecar `.mtl` and glTF keeps
+geometry in a `.bin`, so uploading either of those files alone silently loses
+data. Extracting preserves the directory structure, which is what makes the
+relative references inside those files resolve.
+
+Two layouts are handled, both standard on model marketplaces:
+
+| Layout | Example |
+|---|---|
+| Model at the top level | `scene.gltf` + `scene.bin` + `textures/` |
+| Real source in a nested zip | `source/FINAL_MODEL_23.zip` + `textures/` |
+
+Nested archives are opened one level deep, and only when the top level holds no
+model of its own. A `source/` folder is searched first, being the conventional
+home for the original.
+
+Selection between multiple candidates is by format preference (GLB, glTF, FBX,
+OBJ, blend, USD, Alembic, STL, PLY, STEP, IGES), then shallowest path, then
+largest file. `__MACOSX/` entries and `._` resource forks are ignored.
+
+### Extraction safety
+
+`safe_extract` refuses, rather than sanitises:
+
+- **Zip-slip** — absolute paths, `..` components, drive letters, and any entry
+  whose resolved target escapes the destination. Backslash separators are
+  normalised first so `..\..\x` cannot slip past a forward-slash-only check.
+- **Symlinks** — entries whose Unix mode marks them `S_IFLNK` are skipped, so a
+  link cannot be materialised pointing outside the sandbox.
+- **Entry floods** — more than `MAX_ENTRIES` (4,000).
+- **Decompression bombs** — the declared uncompressed total is checked up front
+  against the budget, and the running total is checked again while writing, so a
+  lying central directory does not get a free pass.
+
+### Texture relinking
+
+After import, any image whose recorded filepath does not exist is rebound to a
+file of the same *filename* found anywhere under the extraction root. This
+repairs the extremely common case of an `.mtl` carrying the author's own
+absolute paths:
+
+```
+map_Kd C:/Users/someone/DefaultMaterial_baseColor.jpeg
+```
+
+while the archive actually ships `textures/DefaultMaterial_baseColor.jpeg`.
+
+Matching is deliberately by exact filename and nothing else — no fuzzy matching,
+no extension substitution — so the wrong texture is never bound to a material.
+A reference to `DefaultMaterial_normal.jpeg` in an archive shipping
+`DefaultMaterial_normal.png` therefore stays unresolved, which is the correct
+outcome: the source file is wrong and guessing could be worse than a miss. The
+count of relinked images is reported in the job log.

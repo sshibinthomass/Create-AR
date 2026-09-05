@@ -25,6 +25,7 @@ This is the `Convert` stage of the larger [Create-AR Studio plan](PLAN.md).
 | `.blend`           |  ✅   |   —    | Blender |
 | **STEP** (`.step`, `.stp`) | ✅ | — | OpenCASCADE → Blender |
 | **IGES** (`.iges`, `.igs`) | ✅ | — | OpenCASCADE → Blender |
+| **ZIP** archive | ✅ | — | unpacked, then as above |
 
 CAD is **input-only**: the pipeline tessellates B-rep surfaces into meshes, and
 there is no path back from a mesh to parametric CAD.
@@ -35,6 +36,35 @@ there is no path back from a mesh to parametric CAD.
 
 Multi-file outputs (`.obj` → `.obj`+`.mtl`+textures, `.gltf` → `.gltf`+`.bin`+textures)
 are returned as a `.zip`.
+
+## Zip archives
+
+Upload the `.zip` a model marketplace gave you and the model inside is found
+automatically. This is usually **better** than uploading the model on its own,
+because an OBJ needs its `.mtl` and a glTF needs its `.bin` and textures —
+extracting keeps them together so those references resolve.
+
+Both common layouts work:
+
+```
+scene.gltf + scene.bin + textures/      model at the top level
+source/Thing.zip + textures/            real source inside a nested archive
+```
+
+When several models are present the most capable one wins (glTF/GLB, then FBX,
+then OBJ, …), preferring shallower paths. The download is named after the model
+found inside, not the archive.
+
+**Broken texture paths are repaired.** Distributed archives very often ship an
+`.mtl` full of the original author's absolute paths (`map_Kd
+C:/Users/bob/albedo.png`) while the images sit in a sibling `textures/` folder.
+Any texture whose recorded path does not exist is rebound to a file of the *same
+filename* elsewhere in the upload, and the job log says how many were relinked.
+Matching is by exact filename only, so a wrong image is never substituted — a
+texture referenced as `.jpeg` when the archive ships `.png` stays unresolved.
+
+Extraction refuses path traversal (`../`, absolute paths, drive letters),
+symlinks, more than 4,000 entries, and anything expanding past 2 GB.
 
 ## Sample models
 
@@ -162,10 +192,12 @@ curl -F file=@part.stp -F target=.usdz \
 .venv/Scripts/python -m pytest backend/tests -q
 ```
 
-22 tests, covering format/alias resolution, upload validation, path-traversal
-handling, and real Blender conversions: STL → GLB/USDZ/FBX/OBJ, STEP → USDZ,
-USDZ archive compliance, scale/centre correctness, and error reporting. The
-conversion tests skip automatically when Blender is absent.
+42 tests, covering format/alias resolution, upload validation, filename
+sanitisation, archive extraction safety (zip-slip, symlinks, entry floods,
+decompression bombs), model selection inside archives, texture relinking, and
+real Blender conversions: STL → GLB/USDZ/FBX/OBJ, STEP → USDZ, zipped OBJ with
+materials, USDZ archive compliance, scale/centre correctness, and error
+reporting. The conversion tests skip automatically when Blender is absent.
 
 ## How it works
 
