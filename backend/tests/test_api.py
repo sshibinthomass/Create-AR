@@ -134,12 +134,31 @@ def run_job(filename: str, payload: bytes, target: str, options: dict | None = N
     return await_job(r.json()["id"], timeout)
 
 
-def glb_node_names(data: bytes) -> list[str]:
-    """Node names out of a GLB's JSON chunk, which is where part names land."""
+def glb_doc(data: bytes) -> dict:
+    """The JSON chunk of a GLB, which is where names, transforms and materials land."""
     assert data[:4] == b"glTF", "not a GLB"
     length = struct.unpack("<I", data[12:16])[0]
-    doc = json.loads(data[20:20 + length])
-    return [n.get("name", "") for n in doc.get("nodes", [])]
+    return json.loads(data[20:20 + length])
+
+
+def glb_node_names(data: bytes) -> list[str]:
+    return [n.get("name", "") for n in glb_doc(data).get("nodes", [])]
+
+
+def glb_node(data: bytes, name: str) -> dict:
+    for node in glb_doc(data).get("nodes", []):
+        if node.get("name") == name:
+            return node
+    pytest.fail(f"no node named {name!r} in the GLB")
+
+
+def glb_material(data: bytes, node: dict) -> dict:
+    """The material on a node's first mesh primitive."""
+    doc = glb_doc(data)
+    assert "mesh" in node, f"node {node.get('name')!r} draws nothing"
+    primitive = doc["meshes"][node["mesh"]]["primitives"][0]
+    assert "material" in primitive, "primitive carries no material"
+    return doc["materials"][primitive["material"]]
 
 
 @needs_blender
@@ -343,6 +362,185 @@ def test_reexport_renames_parts_in_the_output():
     assert again["id"] != job["id"], "re-export must not overwrite the original job"
     assert "Housing" in glb_node_names(
         client.get(f"/api/jobs/{again['id']}/download").content)
+
+
+def test_part_edits_drop_the_ones_left_alone():
+    from app.main import Options
+
+    opts = Options(edits={
+        "untouched": {},
+        "nudged": {"move": [0.0, 0.5, 0.0]},
+        "restyled": {"material": "metal", "color": "#ff0000"},
+    })
+    # A part the user selected and never changed carries a default edit.
+    assert set(opts.edits) == {"nudged", "restyled"}
+
+    with pytest.raises(ValidationError):
+        Options(edits={"a": {"scale": [1.0, 0.0, 1.0]}})   # a part cannot vanish
+    with pytest.raises(ValidationError):
+        Options(edits={"a": {"scale": [1.0, -2.0, 1.0]}})  # nor turn inside out
+    with pytest.raises(ValidationError):
+        Options(edits={"a": {"scale": [2.0, 2.0]}})        # must be three axes
+    with pytest.raises(ValidationError):
+        Options(edits={"a": {"material": "velvet"}})  # not a preset we ship
+    with pytest.raises(ValidationError):
+        Options(edits={"a": {"move": [1.0, 2.0]}})    # must be three axes
+    with pytest.raises(ValidationError):
+        Options(edits={"a": {"move": [float("nan"), 0.0, 0.0]}})
+    with pytest.raises(ValidationError):
+        Options(edits={str(i): {"scale": 2.0} for i in range(501)})
+
+
+@needs_blender
+def test_reexport_moves_scales_and_restyles_a_part():
+    job = run_job("cube.stl", CUBE_STL.read_bytes(), ".glb")
+    assert job["status"] == "done", job["error"]
+    original = client.get(f"/api/jobs/{job['id']}/download").content
+    name = glb_node_names(original)[0]
+    was = glb_node(original, name).get("translation", [0.0, 0.0, 0.0])
+
+    r = client.post(
+        f"/api/jobs/{job['id']}/reexport",
+        data={"target": ".glb", "options": json.dumps({"edits": {name: {
+            "move": [1.0, 2.0, 3.0], "rotate": [0.0, 0.0, 0.0],
+            "scale": [2.0, 2.0, 2.0], "material": "metal", "color": "#ff0000"}}})},
+    )
+    assert r.status_code == 202, r.text
+    again = await_job(r.json()["id"])
+    assert again["status"] == "done", again["error"]
+
+    data = client.get(f"/api/jobs/{again['id']}/download").content
+    node = glb_node(data, name)
+    # The move was authored in the viewer's glTF axes, so it must land in the
+    # exported file unrotated -- not swapped into Blender's Z-up.
+    assert node["translation"] == pytest.approx(
+        [was[0] + 1.0, was[1] + 2.0, was[2] + 3.0], abs=1e-4)
+    assert node.get("scale", [1, 1, 1]) == pytest.approx([2.0, 2.0, 2.0], abs=1e-4)
+
+    pbr = glb_material(data, node)["pbrMetallicRoughness"]
+    assert pbr["baseColorFactor"] == pytest.approx([1.0, 0.0, 0.0, 1.0], abs=1e-3)
+    # glTF omits metallicFactor when it is 1.0, which is what "metal" means.
+    assert pbr.get("metallicFactor", 1.0) == pytest.approx(1.0)
+
+
+@needs_blender
+def test_reexport_rotates_a_part_about_the_viewers_axes():
+    job = run_job("cube.stl", CUBE_STL.read_bytes(), ".glb")
+    assert job["resultStats"]["dimensions"] == pytest.approx([2.0, 1.0, 3.0], abs=1e-4)
+    name = glb_node_names(client.get(f"/api/jobs/{job['id']}/download").content)[0]
+
+    r = client.post(
+        f"/api/jobs/{job['id']}/reexport",
+        data={"target": ".glb", "options": json.dumps(
+            {"edits": {name: {"rotate": [0.0, 90.0, 0.0]}}})},
+    )
+    again = await_job(r.json()["id"])
+    assert again["status"] == "done", again["error"]
+
+    # The viewer's Y is Blender's Z, so a quarter turn about it swaps the box's
+    # X and Y and leaves its height alone. Getting the axis mapping wrong would
+    # tip the box over instead, giving [3, 1, 2] or [2, 3, 1].
+    assert again["resultStats"]["dimensions"] == pytest.approx(
+        [1.0, 2.0, 3.0], abs=1e-3)
+
+
+@needs_blender
+def test_reexport_scales_each_axis_independently():
+    job = run_job("cube.stl", CUBE_STL.read_bytes(), ".glb")
+    name = glb_node_names(client.get(f"/api/jobs/{job['id']}/download").content)[0]
+
+    r = client.post(
+        f"/api/jobs/{job['id']}/reexport",
+        data={"target": ".glb", "options": json.dumps(
+            {"edits": {name: {"scale": [3.0, 1.0, 0.5]}}})},
+    )
+    again = await_job(r.json()["id"])
+    assert again["status"] == "done", again["error"]
+
+    data = client.get(f"/api/jobs/{again['id']}/download").content
+    assert glb_node(data, name).get("scale") == pytest.approx([3.0, 1.0, 0.5], abs=1e-4)
+
+
+@needs_blender
+def test_names_with_reserved_characters_survive_a_round_trip():
+    """Maya and Sketchfab namespace their parts with a colon.
+
+    three.js strips ``[ ] . : /`` from node names when it loads a glTF, so the
+    viewer has to recover the file's own name -- an edit keyed by the sanitised
+    one matches nothing. This is the backend half: a colon has to survive being
+    written, read back and then used as an edit key.
+    """
+    job = run_job("cube.stl", CUBE_STL.read_bytes(), ".glb")
+    name = glb_node_names(client.get(f"/api/jobs/{job['id']}/download").content)[0]
+
+    r = client.post(
+        f"/api/jobs/{job['id']}/reexport",
+        data={"target": ".glb",
+              "options": json.dumps({"renames": {name: "Vanquish:SK_Hood_101"}})},
+    )
+    renamed = await_job(r.json()["id"])
+    assert renamed["status"] == "done", renamed["error"]
+    body = client.get(f"/api/jobs/{renamed['id']}/download").content
+    assert "Vanquish:SK_Hood_101" in glb_node_names(body)
+
+    # Re-upload that file, so the colon is genuinely the name of the part the
+    # next job imports -- a re-export would go back to the original cube.stl.
+    again = run_job("hood.glb", body, ".glb")
+    assert "Vanquish:SK_Hood_101" in glb_node_names(
+        client.get(f"/api/jobs/{again['id']}/download").content)
+
+    r = client.post(
+        f"/api/jobs/{again['id']}/reexport",
+        data={"target": ".glb", "options": json.dumps(
+            {"edits": {"Vanquish:SK_Hood_101": {"move": [0.0, 2.0, 0.0]}}})},
+    )
+    moved = await_job(r.json()["id"])
+    assert moved["status"] == "done", moved["error"]
+    assert not moved["warnings"], moved["warnings"]
+    node = glb_node(client.get(f"/api/jobs/{moved['id']}/download").content,
+                    "Vanquish:SK_Hood_101")
+    assert node.get("translation", [0, 0, 0])[1] == pytest.approx(2.0, abs=1e-4)
+
+
+@needs_blender
+def test_an_edit_naming_no_part_is_reported_not_swallowed():
+    job = run_job("cube.stl", CUBE_STL.read_bytes(), ".glb")
+
+    r = client.post(
+        f"/api/jobs/{job['id']}/reexport",
+        data={"target": ".glb", "options": json.dumps(
+            {"edits": {"NoSuchPart": {"move": [1.0, 0.0, 0.0]}}})},
+    )
+    again = await_job(r.json()["id"])
+    # The export still succeeds -- but silently returning an unedited model is
+    # exactly what makes this look like a bug, so it has to say something.
+    assert again["status"] == "done", again["error"]
+    assert any("NoSuchPart" in w for w in again["warnings"]), again["warnings"]
+
+
+@needs_blender
+def test_styling_one_part_does_not_bleed_onto_another_in_obj():
+    """OBJ's ``usemtl`` is a running state, so an unstyled part written after a
+    styled one used to inherit its colour."""
+    job = run_job("cube.stl", CUBE_STL.read_bytes(), ".glb")
+    name = glb_node_names(client.get(f"/api/jobs/{job['id']}/download").content)[0]
+
+    r = client.post(
+        f"/api/jobs/{job['id']}/reexport",
+        data={"target": ".obj", "options": json.dumps(
+            {"edits": {name: {"material": "metal", "color": "#ff0000"}}})},
+    )
+    again = await_job(r.json()["id"])
+    assert again["status"] == "done", again["error"]
+
+    body = client.get(f"/api/jobs/{again['id']}/download").content
+    with zipfile.ZipFile(io.BytesIO(body)) as zf:
+        obj = next(n for n in zf.namelist() if n.endswith(".obj"))
+        text = zf.read(obj).decode("utf-8", "replace")
+    groups = [ln for ln in text.splitlines() if ln.startswith(("o ", "usemtl "))]
+    # Every object that appears must carry its own usemtl, so none can inherit.
+    objects = [ln for ln in groups if ln.startswith("o ")]
+    assert len(objects) == sum(1 for ln in groups if ln.startswith("usemtl ")), groups
 
 
 @needs_blender

@@ -57,6 +57,52 @@ export interface Job {
   log: string[]
 }
 
+/** '' keeps whatever material the part was authored with. */
+export type MaterialType = '' | 'plastic' | 'metal' | 'glass' | 'matte' | 'emissive'
+
+/**
+ * A small tweak to one part, made in the Analysis tab.
+ *
+ * Every field is a *delta* on the part's own local transform, in the viewer's
+ * axes and the model's units -- the same thing a gizmo drag produces. The
+ * backend swizzles them onto Blender's axes, so rotation and scale pivot on the
+ * part's origin exactly as they did on screen.
+ */
+export interface PartEdit {
+  move: [number, number, number]
+  rotate: [number, number, number]  // degrees, about the part's own axes
+  scale: [number, number, number]
+  material: MaterialType
+  color: string                     // '#rrggbb'
+}
+
+/** Principled BSDF settings per material, mirroring MATERIALS in blender_job.py. */
+export const MATERIALS: Record<Exclude<MaterialType, ''>, {
+  label: string
+  metalness: number
+  roughness: number
+  transmission: number
+  emission: number
+}> = {
+  plastic: { label: 'Plastic', metalness: 0, roughness: 0.35, transmission: 0, emission: 0 },
+  metal: { label: 'Metal', metalness: 1, roughness: 0.25, transmission: 0, emission: 0 },
+  glass: { label: 'Glass', metalness: 0, roughness: 0.05, transmission: 1, emission: 0 },
+  matte: { label: 'Matte', metalness: 0, roughness: 0.9, transmission: 0, emission: 0 },
+  emissive: { label: 'Glowing', metalness: 0, roughness: 0.5, transmission: 0, emission: 2 },
+}
+
+export const NO_EDIT: PartEdit = {
+  move: [0, 0, 0], rotate: [0, 0, 0], scale: [1, 1, 1], material: '', color: '#9aa6c0',
+}
+
+export const isEdited = (e: PartEdit | undefined): boolean =>
+  e != null && (e.material !== ''
+    || e.move.some((v) => v !== 0) || e.rotate.some((v) => v !== 0)
+    || e.scale.some((v) => v !== 1))
+
+/** Which gizmo, if any, is attached to the selected part in the viewer. */
+export type GizmoMode = 'translate' | 'rotate' | 'scale' | null
+
 export interface ConvertOptions {
   scale: number
   center: 'none' | 'origin' | 'floor'
@@ -71,6 +117,8 @@ export interface ConvertOptions {
   archive_entry?: string
   /** Old part name -> new part name, written into the exported file. */
   renames?: Record<string, string>
+  /** Part name -> the move, rotation, scale and material to apply to it. */
+  edits?: Record<string, PartEdit>
 }
 
 export const DEFAULT_OPTIONS: ConvertOptions = {
@@ -167,5 +215,11 @@ export function formatBytes(n: number | null | undefined): string {
   return `${value.toFixed(value < 10 ? 1 : 0)} ${units[i]}`
 }
 
+// Grouped in thousands whatever the reader's locale is. The default grouping
+// follows the browser, which renders 453,296 as 4,53,296 in en-IN and similar --
+// correct for prose, but these sit in a row of figures meant to be scanned and
+// compared against what other 3D tools report.
+const COUNT = new Intl.NumberFormat('en-US')
+
 export const formatCount = (n: number | null | undefined): string =>
-  n == null ? '--' : n.toLocaleString()
+  n == null ? '--' : COUNT.format(n)

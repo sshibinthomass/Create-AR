@@ -85,6 +85,48 @@ button:disabled { cursor: not-allowed; }
 }
 @media (max-width: 980px) { .layout { grid-template-columns: 1fr; } }
 
+/* ---------- analysis layout ---------- */
+
+/* The model being loaded spans the top; the parts list and the viewer share
+   the room underneath, which is where the editing happens. */
+.analysis {
+  flex: 1;
+  display: grid;
+  grid-template-columns: minmax(340px, 440px) 1fr;
+  gap: 16px 20px;
+  padding: 20px 24px 32px;
+  max-width: 1500px;
+  width: 100%;
+  margin: 0 auto;
+  align-items: start;
+}
+.analysis > .source { grid-column: 1 / -1; }
+
+/* Dropzone, explanation and the button sit in a row so the band stays short
+   and the viewer keeps the height. */
+.source-body {
+  display: grid;
+  grid-template-columns: minmax(220px, 1fr) minmax(0, 1.6fr) auto;
+  gap: 14px;
+  align-items: center;
+}
+.source-body .note { margin-top: 0; }
+.source-body .go { width: auto; min-width: 150px; align-self: center; }
+.source .stats { border-top: 1px solid var(--line-soft); }
+
+@media (max-width: 1180px) {
+  .source-body { grid-template-columns: 1fr; }
+  .source-body .go { width: 100%; }
+}
+/* The band above is short, so the viewer takes the rest of the window rather
+   than the fixed height it uses on the Convert tab -- this is a workspace. */
+.analysis .viewer { height: clamp(420px, calc(100vh - 300px), 900px); }
+
+@media (max-width: 980px) {
+  .analysis { grid-template-columns: 1fr; }
+  .analysis .viewer { height: 420px; }
+}
+
 .col { display: flex; flex-direction: column; gap: 16px; min-width: 0; }
 
 .card {
@@ -94,7 +136,7 @@ button:disabled { cursor: not-allowed; }
   overflow: hidden;
 }
 .card-head {
-  display: flex; align-items: center; gap: 10px;
+  display: flex; align-items: center; flex-wrap: wrap; gap: 8px 10px;
   padding: 12px 16px;
   border-bottom: 1px solid var(--line-soft);
 }
@@ -265,6 +307,17 @@ input[type='range'] { width: 110px; accent-color: var(--accent); }
 .explode-btn:hover { color: var(--text); border-color: #38405a; }
 .explode-btn.on { color: var(--accent); border-color: var(--accent); background: rgba(91, 140, 255, .14); }
 
+/* Sits beside the separation button, sharing its look. */
+.view-reset {
+  position: absolute; top: 10px; right: 150px;
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 6px 11px; border-radius: 8px;
+  background: rgba(18, 21, 29, .82); border: 1px solid var(--line);
+  color: var(--muted); font-size: 12px; backdrop-filter: blur(6px);
+  transition: color .12s, border-color .12s;
+}
+.view-reset:hover { color: var(--text); border-color: #38405a; }
+
 .explode-panel {
   position: absolute; right: 10px; bottom: 10px; width: 232px;
   padding: 10px 12px 9px; border-radius: 10px;
@@ -327,6 +380,78 @@ input[type='range'] { width: 110px; accent-color: var(--accent); }
 .part-undo:hover { color: var(--accent); background: var(--panel-2); }
 
 .head-note { margin-left: auto; font-size: 11px; color: var(--accent); }
+.head-note + .head-reset { margin-left: 0; }
+.head-reset {
+  flex: none;
+  background: none; border: 1px solid var(--line); color: var(--muted);
+  border-radius: 7px; padding: 3px 9px; font-size: 11px;
+}
+.head-reset:hover { color: var(--accent); border-color: var(--accent); }
+
+.part-edited { flex: none; font-size: 12px; color: var(--accent); line-height: 1; }
+
+/* ---------- transform gizmo ---------- */
+
+.gizmo-bar {
+  position: absolute; top: 12px; left: 12px; z-index: 5;
+  display: flex; gap: 4px; padding: 4px;
+  background: rgba(11, 13, 18, .82); border: 1px solid var(--line);
+  border-radius: 9px; backdrop-filter: blur(6px);
+}
+.gizmo-btn {
+  display: inline-flex; align-items: center; gap: 5px;
+  padding: 5px 9px; border-radius: 6px;
+  background: none; border: 1px solid transparent;
+  color: var(--muted); font-size: 12px;
+}
+.gizmo-btn:hover { color: var(--text); background: var(--panel-2); }
+.gizmo-btn.on { color: var(--accent); border-color: var(--accent); background: var(--accent-soft); }
+
+.warn-box {
+  margin-top: 12px; padding: 9px 11px; border-radius: 8px;
+  background: rgba(240, 180, 41, .10); border-left: 2px solid var(--warn);
+  font-size: 12px; color: #e6d3a3;
+}
+
+/* ---------- part editor ---------- */
+
+.edit-panel {
+  padding: 12px 16px 14px;
+  border-top: 1px solid var(--line);
+  background: var(--panel-2);
+}
+.edit-head { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; }
+.edit-name {
+  flex: 1; min-width: 0; font-size: 13px; font-weight: 600;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.edit-reset {
+  flex: none; background: none; border: 1px solid var(--line);
+  color: var(--muted); border-radius: 7px; padding: 3px 9px; font-size: 12px;
+}
+.edit-reset:hover { color: var(--accent); border-color: var(--accent); }
+
+.edit-group {
+  font-size: 11px; text-transform: uppercase; letter-spacing: .06em;
+  color: var(--dim); margin: 12px 0 5px;
+}
+.edit-group:first-of-type { margin-top: 0; }
+
+.edit-row { display: flex; align-items: center; gap: 10px; padding: 2px 0; }
+.edit-row label { flex: none; width: 34px; color: var(--muted); font-size: 12px; }
+.edit-row input[type='range'] { flex: 1; width: auto; min-width: 0; }
+.edit-row select { flex: 1; width: auto; min-width: 0; }
+.edit-v {
+  flex: none; width: 56px; text-align: right;
+  font-size: 12px; color: var(--text); font-variant-numeric: tabular-nums;
+}
+.edit-row input[type='color'] {
+  flex: none; width: 34px; height: 30px; padding: 2px;
+  background: var(--panel-2); border: 1px solid var(--line);
+  border-radius: 7px; cursor: pointer;
+}
+.edit-row input[type='color']:disabled { opacity: .35; cursor: not-allowed; }
+.edit-panel .note { margin-top: 10px; }
 
 /* ---------- stats ---------- */
 

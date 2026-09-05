@@ -10,7 +10,7 @@ import os
 import sys
 
 import bpy
-from mathutils import Vector
+from mathutils import Euler, Matrix, Quaternion, Vector
 
 MARKER = "@@"
 
@@ -297,6 +297,164 @@ def apply_renames(mapping):
     return done
 
 
+# Edits are authored against the GLB preview, which was written with
+# ``export_yup``. That option maps every node's *local* transform onto glTF's
+# axes componentwise, at any depth in the hierarchy -- verified against Blender
+# 5.2: an object at (0.5, -0.25, 0.75), scale (1.3, 0.7, 1.0), exports as a node
+# at (0.5, 0.75, 0.25), scale (1.3, 1.0, 0.7), nested or not. So an edit made in
+# the viewer is a local delta in glTF axes, and only has to be swizzled back.
+#
+# Position and the vector part of a rotation both flip: (x, y, z) -> (x, -z, y).
+# Scale is unsigned, so it only swaps: (x, y, z) -> (x, z, y).
+
+def to_blender_vector(v):
+    return Vector((v[0], -v[2], v[1]))
+
+
+def to_blender_scale(s):
+    return Vector((s[0], s[2], s[1]))
+
+
+def to_blender_quaternion(q):
+    return Quaternion((q.w, q.x, -q.z, q.y))
+
+
+# Principled BSDF settings per material name, mirroring MATERIALS in
+# frontend/src/api.ts so the viewer's preview matches the exported file.
+# (metallic, roughness, transmission, emission strength)
+MATERIALS = {
+    "plastic": (0.0, 0.35, 0.0, 0.0),
+    "metal": (1.0, 0.25, 0.0, 0.0),
+    "glass": (0.0, 0.05, 1.0, 0.0),
+    "matte": (0.0, 0.90, 0.0, 0.0),
+    "emissive": (0.0, 0.50, 0.0, 2.0),
+}
+
+NEUTRAL = (0.0, 0.5, 0.0, 0.0)  # for parts that had no material of their own
+
+
+def hex_to_linear(value):
+    """'#rrggbb' from a colour input -> the linear RGB Blender shades in.
+
+    Browser colour pickers speak sRGB; a Principled BSDF socket is linear, and
+    so is glTF's baseColorFactor. Skipping the transfer function here would
+    export every colour noticeably lighter than the one that was picked.
+    """
+    digits = value.lstrip("#")
+    out = []
+    for i in (0, 2, 4):
+        c = int(digits[i:i + 2], 16) / 255.0
+        out.append(c / 12.92 if c <= 0.04045 else ((c + 0.055) / 1.055) ** 2.4)
+    return out
+
+
+def build_material(name, settings, color):
+    mat = bpy.data.materials.new(name=name)
+    mat.use_nodes = True
+    bsdf = mat.node_tree.nodes.get("Principled BSDF")
+    if bsdf is None:  # a factory-startup node tree always has one
+        return mat
+    metallic, roughness, transmission, emission = settings
+    r, g, b = hex_to_linear(color)
+    bsdf.inputs["Base Color"].default_value = (r, g, b, 1.0)
+    bsdf.inputs["Metallic"].default_value = metallic
+    bsdf.inputs["Roughness"].default_value = roughness
+    bsdf.inputs["Transmission Weight"].default_value = transmission
+    bsdf.inputs["Emission Color"].default_value = (r, g, b, 1.0)
+    bsdf.inputs["Emission Strength"].default_value = emission
+    return mat
+
+
+def assign_material(ob, mat):
+    """Put ``mat`` in every slot of ``ob``, replacing what it had."""
+    if ob.type != "MESH" or ob.data is None:
+        return False
+    # Restyling one part must not restyle every other part instanced from the
+    # same mesh, so a shared datablock is forked first.
+    if ob.data.users > 1:
+        ob.data = ob.data.copy()
+    ob.data.materials.clear()
+    ob.data.materials.append(mat)
+    return True
+
+
+def backfill_materials():
+    """Give every unstyled mesh a plain material, and report how many.
+
+    Only needed for OBJ: ``usemtl`` is a running state in the file, so a part
+    written after a styled one and carrying no material of its own silently
+    inherits that style. A model with no materials at all -- most CAD and STL
+    input -- hits this the moment a single part is given a colour.
+    """
+    plain = None
+    done = 0
+    for ob in bpy.data.objects:
+        if ob.type != "MESH" or ob.data is None:
+            continue
+        if any(slot.material for slot in ob.material_slots):
+            continue
+        if plain is None:
+            plain = build_material("cv_neutral", NEUTRAL, "#cccccc")
+        assign_material(ob, plain)
+        done += 1
+    return done
+
+
+def apply_edits(mapping):
+    """Move, rotate, scale and restyle individual parts before export.
+
+    Each edit is a delta on the part's own local transform -- the same thing the
+    viewer's gizmo manipulates -- so it composes with whatever pose the part was
+    authored with instead of replacing it. Rotation and scale therefore pivot on
+    the part's origin, exactly as they appeared on screen.
+
+    Returns ``(applied, styled, missing)``: a name with no object behind it is
+    reported rather than passed over, because silently exporting an unedited
+    model is the one outcome the user cannot tell from a bug.
+    """
+    if not mapping:
+        return 0, 0, []
+
+    applied = 0
+    styled = 0
+    missing = []
+    for name, edit in sorted(mapping.items()):
+        ob = bpy.data.objects.get(name)
+        if ob is None or not isinstance(edit, dict):
+            missing.append(name)
+            continue
+
+        move = to_blender_vector(edit.get("move") or (0.0, 0.0, 0.0))
+        degrees = edit.get("rotate") or (0.0, 0.0, 0.0)
+        spin = to_blender_quaternion(
+            Euler([math.radians(a) for a in degrees], "XYZ").to_quaternion())
+        factor = to_blender_scale(edit.get("scale") or (1.0, 1.0, 1.0))
+
+        # The glTF node transform is the parent inverse folded into the basis,
+        # so the delta is applied there and folded back out. For an unparented
+        # object the parent inverse is the identity and this is just the basis.
+        node = ob.matrix_parent_inverse @ ob.matrix_basis
+        location, rotation, scale = node.decompose()
+        ob.matrix_basis = ob.matrix_parent_inverse.inverted() @ Matrix.LocRotScale(
+            location + move,
+            rotation @ spin,
+            Vector((scale[i] * factor[i] for i in range(3))),
+        )
+        applied += 1
+
+        kind = edit.get("material") or ""
+        if kind in MATERIALS:
+            mat = build_material(ob.name + "_material", MATERIALS[kind],
+                                 edit.get("color") or "#cccccc")
+            hit = assign_material(ob, mat)
+            for child in ob.children_recursive:
+                hit = assign_material(child, mat) or hit
+            styled += 1 if hit else 0
+
+    bpy.context.view_layer.update()
+    return applied, styled, missing
+
+
 def apply_triangulate():
     for ob in bpy.data.objects:
         if ob.type == "MESH":
@@ -348,6 +506,22 @@ def main():
         emit("info", message="Relinked " + str(relinked) + " texture(s) by filename")
 
     emit("stats", source=scene_stats())
+
+    edited, styled, missing = apply_edits(o.get("edits") or {})
+    if edited:
+        emit("info", message="Edited " + str(edited) + " part(s)")
+    if missing:
+        emit("warn", message="No part named " + ", ".join(
+            "'" + n + "'" for n in missing[:5]) + (
+            " (and " + str(len(missing) - 5) + " more)" if len(missing) > 5 else "")
+            + " -- those edits were not applied")
+    # OBJ carries materials as a running state, so an unstyled part written
+    # after a styled one would inherit its colour. Only worth the extra
+    # materials when something actually was styled.
+    if styled and dst_ext == ".obj":
+        filled = backfill_materials()
+        if filled:
+            emit("info", message="Gave " + str(filled) + " unstyled part(s) a plain material")
 
     renamed = apply_renames(o.get("renames") or {})
     if renamed:

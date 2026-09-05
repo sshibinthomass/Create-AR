@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 import re
 import shutil
 import subprocess
@@ -34,8 +35,74 @@ app.add_middleware(
 
 CHUNK = 1024 * 1024
 MAX_RENAMES = 500
+MAX_EDITS = 500
 MAX_NAME_LEN = 120
 _SAFE_STEM = re.compile(r"[^A-Za-z0-9._-]+")
+
+# Material presets, by the name the Analysis tab sends. The viewer keeps a
+# matching table so the preview and the exported file agree; see MATERIALS in
+# frontend/src/api.ts and in blender_job.py.
+MATERIAL_TYPES = ("plastic", "metal", "glass", "matte", "emissive")
+_MATERIAL_PATTERN = "^(|" + "|".join(MATERIAL_TYPES) + ")$"
+# A move of a thousand times the model's own size is already meaningless, and
+# the cap keeps a malformed slider from writing a part out at 1e30.
+MOVE_LIMIT = 1e6
+SCALE_LIMIT = 1000.0
+
+
+def _vec3(value: list[float], limit: float) -> list[float]:
+    if len(value) != 3:
+        raise ValueError("expected three numbers")
+    out = []
+    for raw in value:
+        number = float(raw)
+        if not math.isfinite(number):
+            raise ValueError("expected a finite number")
+        out.append(max(-limit, min(limit, number)))
+    return out
+
+
+class PartEdit(BaseModel):
+    """One part's transform and material override, from the Analysis tab.
+
+    Every field is a *delta* on the part's own local transform, in the viewer's
+    glTF-style Y-up axes -- the space the user was dragging in. The backend
+    swizzles them onto Blender's axes, so rotation and scale pivot on the part's
+    origin exactly as they did on screen.
+    """
+
+    move: list[float] = Field(default_factory=lambda: [0.0, 0.0, 0.0])
+    rotate: list[float] = Field(default_factory=lambda: [0.0, 0.0, 0.0])  # degrees
+    scale: list[float] = Field(default_factory=lambda: [1.0, 1.0, 1.0])
+    # "" keeps whatever material the part was authored with.
+    material: str = Field("", pattern=_MATERIAL_PATTERN)
+    color: str = Field("#cccccc", pattern="^#[0-9a-fA-F]{6}$")
+
+    @field_validator("move")
+    @classmethod
+    def _clean_move(cls, value: list[float]) -> list[float]:
+        return _vec3(value, MOVE_LIMIT)
+
+    @field_validator("rotate")
+    @classmethod
+    def _clean_rotate(cls, value: list[float]) -> list[float]:
+        return _vec3(value, 360.0)
+
+    @field_validator("scale")
+    @classmethod
+    def _clean_scale(cls, value: list[float]) -> list[float]:
+        axes = _vec3(value, SCALE_LIMIT)
+        if any(a <= 0 for a in axes):
+            raise ValueError("scale must be positive on every axis")
+        return axes
+
+    def is_noop(self) -> bool:
+        return (
+            not self.material
+            and not any(self.move)
+            and not any(self.rotate)
+            and all(a == 1.0 for a in self.scale)
+        )
 
 
 class Options(BaseModel):
@@ -57,6 +124,8 @@ class Options(BaseModel):
     archive_entry: str = Field("", max_length=512)
     # Old object name -> new object name, applied between import and export.
     renames: dict[str, str] = Field(default_factory=dict)
+    # Object name -> the tweaks to apply to it, likewise before export.
+    edits: dict[str, PartEdit] = Field(default_factory=dict)
 
     @field_validator("renames")
     @classmethod
@@ -72,6 +141,15 @@ class Options(BaseModel):
             if name and name != old:
                 cleaned[str(old)[:MAX_NAME_LEN]] = name
         return cleaned
+
+    @field_validator("edits")
+    @classmethod
+    def _drop_untouched_edits(cls, value: dict[str, PartEdit]) -> dict[str, PartEdit]:
+        if len(value) > MAX_EDITS:
+            raise ValueError(f"at most {MAX_EDITS} edited parts per job")
+        # A part the user selected and then left alone carries a full default
+        # edit; sending it would make the job look changed when it is not.
+        return {str(k)[:MAX_NAME_LEN]: v for k, v in value.items() if not v.is_noop()}
 
 
 def safe_stem(filename: str) -> str:

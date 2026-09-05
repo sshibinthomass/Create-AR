@@ -1,13 +1,17 @@
 import {
   Component, Suspense, useCallback, useEffect, useMemo, useRef, useState,
-  type ReactNode, type RefObject,
+  type MutableRefObject, type ReactNode, type RefObject,
 } from 'react'
-import { Canvas, useFrame } from '@react-three/fiber'
-import { Environment, Grid, Html, Lightformer, OrbitControls, useGLTF } from '@react-three/drei'
+import { Canvas, useFrame, useThree } from '@react-three/fiber'
 import {
-  Box3, Box3Helper, Color, Matrix3, Matrix4, Vector3,
-  type Group, type LineBasicMaterial, type Object3D,
+  Environment, Grid, Html, Lightformer, OrbitControls, TransformControls, useGLTF,
+} from '@react-three/drei'
+import {
+  Box3, Box3Helper, Color, Euler, Matrix3, Matrix4, MeshPhysicalMaterial, Object3D,
+  Quaternion, Vector3,
+  type Group, type LineBasicMaterial, type Material, type Mesh,
 } from 'three'
+import { MATERIALS, NO_EDIT, type GizmoMode, type PartEdit } from '../api'
 
 /**
  * Image-based lighting built from in-scene emissive panels.
@@ -30,6 +34,35 @@ function LocalEnvironment() {
       <Lightformer intensity={0.6} position={[0, -4, 0]} scale={[12, 12, 1]} rotation-x={-Math.PI / 2} />
     </Environment>
   )
+}
+
+/**
+ * The name each part carries *in the file*, not the one three.js gives it.
+ *
+ * GLTFLoader puts every node name through PropertyBinding.sanitizeNodeName,
+ * which strips `[`, `]`, `.`, `:` and `/` -- the characters its animation
+ * binding syntax reserves -- and turns whitespace into underscores. Maya and
+ * Sketchfab exports namespace their parts with a colon, so what the viewer
+ * calls a part can differ from what the exporter wrote. Names are how an edit
+ * or a rename finds its object when the model is converted again, so they have
+ * to be the file's own; the loader keeps the mapping to recover them.
+ */
+interface NameSource {
+  json?: { nodes?: { name?: string }[] }
+  associations?: Map<object, { nodes?: number }>
+}
+
+function fileNames(parser: NameSource | undefined): Map<Object3D, string> {
+  const out = new Map<Object3D, string>()
+  const nodes = parser?.json?.nodes
+  if (!parser?.associations || !nodes) return out
+  for (const [object, ref] of parser.associations) {
+    const index = (ref as { nodes?: number })?.nodes
+    if (index == null) continue
+    const name = nodes[index]?.name
+    if (name && (object as Object3D).isObject3D) out.set(object as Object3D, name)
+  }
+  return out
 }
 
 /** Does this node, or anything under it, actually draw something? */
@@ -68,10 +101,18 @@ function spiralDirection(i: number, count: number): Vector3 {
   return new Vector3(Math.cos(theta) * r, y, Math.sin(theta) * r)
 }
 
+interface Assembly {
+  parts: Part[]
+  /** How far a part may usefully be nudged, in the space `move` is applied in. */
+  reach: number
+}
+
 interface Part {
   node: Object3D
   name: string
   base: Vector3    // its resting position
+  baseQuat: Quaternion  // and the rest of its resting pose, which an edit replaces
+  baseScale: Vector3
   offset: Vector3  // where one unit of separation takes it, in the same space
   centre: Vector3  // its bounding-box centre, in its own local space
 }
@@ -81,17 +122,17 @@ interface Part {
  * proportional to how far off-centre it already sits, so the arrangement stays
  * recognisable instead of collapsing into an even starburst.
  */
-function buildParts(scene: Object3D): Part[] {
+function buildParts(scene: Object3D, names: Map<Object3D, string>): Assembly {
   scene.updateWorldMatrix(false, true)
   const nodes = partNodes(scene)
-  if (!nodes.length) return []
+  if (!nodes.length) return { parts: [], reach: 1 }
 
   const boxes = nodes.map((n) => new Box3().setFromObject(n))
   const whole = boxes.reduce((acc, b) => acc.union(b), new Box3())
   const centre = whole.getCenter(new Vector3())
   const radius = whole.getSize(new Vector3()).length() / 2 || 1
 
-  return nodes.map((node, i) => {
+  const parts = nodes.map((node, i) => {
     const offset = boxes[i].getCenter(new Vector3()).sub(centre)
     // A part sitting near the centre of the assembly -- a core inside a housing
     // -- has nowhere to go radially and would stay buried inside its neighbours
@@ -108,12 +149,103 @@ function buildParts(scene: Object3D): Part[] {
     const localCentre = node.worldToLocal(boxes[i].getCenter(new Vector3()))
     return {
       node,
-      name: node.name,
+      name: names.get(node) ?? node.name,
       base: node.position.clone(),
+      baseQuat: node.quaternion.clone(),
+      baseScale: node.scale.clone(),
       offset: offset.applyMatrix3(toLocal),
       centre: localCentre,
     }
   })
+
+  // A part's position lives in its parent's space, so that is the space the
+  // move sliders have to reach across. The two can differ wildly: a Sketchfab
+  // export wraps the whole model in a scaled root, which leaves the assembly
+  // a couple of hundredths of a unit across in world space while its parts sit
+  // whole units apart in their own.
+  const toParent = new Matrix3().setFromMatrix4(nodes[0].parent!.matrixWorld).invert()
+  const span = whole.getSize(new Vector3()).applyMatrix3(toParent)
+  const reach = Math.max(Math.abs(span.x), Math.abs(span.y), Math.abs(span.z))
+  return { parts, reach: Number.isFinite(reach) && reach > 0 ? reach : 1 }
+}
+
+const DEG = Math.PI / 180
+const BLACK = new Color('#000000')
+// Big enough to grab on a busy model, and drawn after everything else.
+const GIZMO_SIZE = 1.4
+const GIZMO_ORDER = 10_000
+
+/**
+ * The material an edited part is shown in.
+ *
+ * Built fresh rather than cloned from the part's own: the export replaces the
+ * material outright, textures included, so a preview that kept the original
+ * maps would promise something the saved file does not deliver.
+ */
+function buildMaterial(edit: PartEdit): Material {
+  const preset = MATERIALS[edit.material as keyof typeof MATERIALS]
+  const colour = new Color(edit.color)
+  return new MeshPhysicalMaterial({
+    color: colour,
+    metalness: preset.metalness,
+    roughness: preset.roughness,
+    transmission: preset.transmission,
+    thickness: preset.transmission ? 0.5 : 0,
+    ior: 1.45,
+    transparent: preset.transmission > 0,
+    emissive: preset.emission ? colour : BLACK,
+    emissiveIntensity: preset.emission,
+  })
+}
+
+/**
+ * Put a part into its edited pose: its rest transform with the edit's deltas
+ * laid on top, plus however far the separation slider has pushed it out.
+ *
+ * Position and separation are both parent-space translations and simply add.
+ * Rotation multiplies on the right and scale multiplies componentwise, which is
+ * what makes them pivot on the part's own origin -- and is exactly the
+ * composition the exporter performs, so the preview is not an approximation.
+ */
+function poseNode(part: Part, edit: PartEdit, separation: number) {
+  const { node } = part
+  node.position.copy(part.base)
+    .add(new Vector3(edit.move[0], edit.move[1], edit.move[2]))
+    .addScaledVector(part.offset, separation)
+  node.quaternion.copy(part.baseQuat).multiply(
+    new Quaternion().setFromEuler(
+      new Euler(edit.rotate[0] * DEG, edit.rotate[1] * DEG, edit.rotate[2] * DEG, 'XYZ')))
+  node.scale.set(
+    part.baseScale.x * edit.scale[0],
+    part.baseScale.y * edit.scale[1],
+    part.baseScale.z * edit.scale[2],
+  )
+}
+
+/**
+ * The inverse: read a part the gizmo has just dragged back out as an edit.
+ *
+ * The separation offset is subtracted first, so dragging a part while the model
+ * is pulled apart records where the part was moved to, not where the slider had
+ * already put it.
+ */
+function readNode(part: Part, separation: number, previous: PartEdit): PartEdit {
+  const { node } = part
+  const move = node.position.clone()
+    .sub(part.base)
+    .addScaledVector(part.offset, -separation)
+  const spin = new Euler().setFromQuaternion(
+    part.baseQuat.clone().invert().multiply(node.quaternion), 'XYZ')
+  return {
+    ...previous,
+    move: [move.x, move.y, move.z],
+    rotate: [spin.x / DEG, spin.y / DEG, spin.z / DEG],
+    scale: [
+      node.scale.x / (part.baseScale.x || 1),
+      node.scale.y / (part.baseScale.y || 1),
+      node.scale.z / (part.baseScale.z || 1),
+    ],
+  }
 }
 
 /**
@@ -126,7 +258,7 @@ function buildParts(scene: Object3D): Part[] {
 function PartLabels({ parts, names, selected, wrapper }: {
   parts: Part[]
   names: string[]
-  selected: string | null
+  selected: ReadonlySet<string>
   wrapper: RefObject<Group | null>
 }) {
   const refs = useRef<(Group | null)[]>([])
@@ -148,7 +280,7 @@ function PartLabels({ parts, names, selected, wrapper }: {
       {parts.map((p, i) => (
         <group key={`${p.name}-${i}`} ref={(el) => { refs.current[i] = el }}>
           <Html center zIndexRange={[40, 0]} style={{ pointerEvents: 'none' }}>
-            <div className={`part-label${selected === p.name ? ' on' : ''}`}>
+            <div className={`part-label${selected.has(p.name) ? ' on' : ''}`}>
               {names[i] || 'Unnamed'}
             </div>
           </Html>
@@ -163,12 +295,18 @@ function PartLabels({ parts, names, selected, wrapper }: {
  *
  * Depth testing is off so a part buried inside the assembly is still findable
  * when the model is only half separated. The box is measured only when the
- * selection or the separation changes -- walking a heavy part's geometry every
- * frame would cost far more than it is worth.
+ * selection, the separation or the part's own edit changes -- walking a heavy
+ * part's geometry every frame would cost far more than it is worth.
+ *
+ * The measurement waits for a frame rather than taking one in the effect that
+ * marks it stale. Parts are moved from an effect in the parent, and React runs
+ * a child's effects first, so measuring there would size the box from the pose
+ * the part held before the change that triggered it.
  */
-function SelectionBox({ part, separation, wrapper }: {
+function SelectionBox({ part, separation, edit, wrapper }: {
   part: Part
   separation: number
+  edit: PartEdit | undefined
   wrapper: RefObject<Group | null>
 }) {
   const helper = useMemo(() => {
@@ -180,14 +318,18 @@ function SelectionBox({ part, separation, wrapper }: {
     return h
   }, [])
 
-  useEffect(() => {
+  const stale = useRef(true)
+  useEffect(() => { stale.current = true }, [part, separation, edit])
+
+  useFrame(() => {
     const root = wrapper.current
-    if (!root) return
+    if (!stale.current || !root) return
+    stale.current = false
     root.updateWorldMatrix(true, true)
     helper.box.setFromObject(part.node)
     // Measured in world space, drawn as a child of the normalising wrapper.
     helper.box.applyMatrix4(new Matrix4().copy(root.matrixWorld).invert())
-  }, [helper, part, separation, wrapper])
+  })
 
   return <primitive object={helper} />
 }
@@ -201,16 +343,21 @@ function SelectionBox({ part, separation, wrapper }: {
  * clip them away entirely, so the model is scaled to the camera rather than the
  * other way round. Real dimensions are reported in the stats panel.
  */
-function Model({ url, separation, showAllLabels, labels, selected, onSelect, onParts }: {
+function Model({
+  url, separation, showAllLabels, labels, edits, gizmo, selected, onSelect, onEdit, onParts,
+}: {
   url: string
   separation: number
   showAllLabels: boolean
   labels: Record<string, string>
-  selected: string | null
-  onSelect: (name: string | null) => void
-  onParts: (names: string[]) => void
+  edits: Record<string, PartEdit>
+  gizmo: GizmoMode
+  selected: readonly string[]
+  onSelect: (name: string | null, additive: boolean) => void
+  onEdit?: (changes: Record<string, PartEdit>) => void
+  onParts: (names: string[], reach: number) => void
 }) {
-  const { scene } = useGLTF(url)
+  const { scene, parser } = useGLTF(url)
   const wrapper = useRef<Group>(null)
 
   const { scale, offset } = useMemo(() => {
@@ -223,47 +370,219 @@ function Model({ url, separation, showAllLabels, labels, selected, onSelect, onP
     return { scale: k, offset: centre.multiplyScalar(-k) }
   }, [scene])
 
-  const parts = useMemo(() => buildParts(scene), [scene])
+  const { parts, reach } = useMemo(
+    () => buildParts(scene, fileNames(parser as NameSource | undefined)),
+    [scene, parser],
+  )
   const names = useMemo(() => parts.map((p) => p.name), [parts])
-  useEffect(() => onParts(names), [names, onParts])
+  useEffect(() => onParts(names, reach), [names, reach, onParts])
 
   // The part nodes belong to the loaded glTF scene, which is mounted whole as a
-  // single <primitive>, so separation is applied by mutating them directly.
+  // single <primitive>, so both the separation and the user's edits are applied
+  // by mutating them directly. They are applied together because they compete
+  // for the same transform.
+  //
+  // While a gizmo is being dragged the parts are left alone: the gizmo is
+  // writing to the same node, and re-posing it underneath would fight the drag.
   useEffect(() => {
-    for (const p of parts) p.node.position.copy(p.base).addScaledVector(p.offset, separation)
-    return () => { for (const p of parts) p.node.position.copy(p.base) }
-  }, [parts, separation])
+    if (dragging.current) return
+    for (const p of parts) poseNode(p, edits[p.name] ?? NO_EDIT, separation)
+  }, [parts, separation, edits])
+
+  // Restoring the rest pose is deliberately *not* the cleanup of the effect
+  // above: that one re-runs on every edit, so mid-drag it would snap the very
+  // node the gizmo is holding back to rest and the drag would walk away. The
+  // parts belong to a cached glTF scene, so they still have to be put back when
+  // this model goes away.
+  useEffect(() => () => { for (const p of parts) poseNode(p, NO_EDIT, 0) }, [parts])
+
+  // Only a part's material and colour reach the GPU, and building a
+  // MeshPhysicalMaterial compiles a shader. Keying the effect below on the whole
+  // edit would recompile one on every frame of a move or rotate drag, so it is
+  // keyed on the styling alone -- which is why `edits` is read but not listed.
+  const styling = JSON.stringify(
+    parts.map((p) => {
+      const edit = edits[p.name]
+      return edit?.material ? [p.name, edit.material, edit.color] : 0
+    }),
+  )
+
+  // Restyling replaces the part's materials outright, so the originals are put
+  // back when the edit goes away -- the glTF's own materials are shared with
+  // whatever else the cache is handing this scene to.
+  useEffect(() => {
+    const original = new Map<Mesh, Material | Material[]>()
+    const made: Material[] = []
+    for (const p of parts) {
+      const edit = edits[p.name]
+      if (!edit?.material) continue
+      const material = buildMaterial(edit)
+      made.push(material)
+      p.node.traverse((n) => {
+        const mesh = n as Mesh
+        if (!mesh.isMesh) return
+        original.set(mesh, mesh.material)
+        mesh.material = material
+      })
+    }
+    return () => {
+      for (const [mesh, material] of original) mesh.material = material
+      for (const material of made) material.dispose()
+    }
+  }, [parts, styling])
 
   // Drop the cached parse when this preview is replaced, so repeated
   // conversions of the same job id never show a stale mesh.
   useEffect(() => () => useGLTF.clear(url), [url])
 
-  const chosen = parts.find((p) => p.name === selected) ?? null
-  const labelled = showAllLabels ? parts : (chosen ? [chosen] : [])
+  const marks = useMemo(() => new Set(selected), [selected])
+  const picked = useMemo(() => parts.filter((p) => marks.has(p.name)), [parts, marks])
+  const labelled = showAllLabels ? parts : picked
+
+  // The gizmo does not grab the part itself. A part's own origin is where the
+  // exporter put it, and plenty of models leave every one of them on the world
+  // origin -- a Sketchfab export wraps each part in an identity node and offsets
+  // the geometry inside it -- so handles drawn there would sit nowhere near the
+  // part you clicked, all in the same spot. Instead an empty stands in at the
+  // part's visible centre, and whatever motion it is given is passed on.
+  //
+  // It also lives outside the normalising wrapper, in plain world space, so the
+  // handles come out a usable size whatever scale the model arrived at.
+  const handle = useMemo(() => new Object3D(), [])
+  // Only ever walked as a scene graph, so the concrete controls type -- which
+  // drei takes from three-stdlib, not from @types/three -- does not matter.
+  const controls = useRef<Object3D>(null) as React.RefObject<never>
+  const dragging = useRef(false)
+  // The part is pinned for the whole drag. A pointerdown on a handle also
+  // reaches the mesh underneath it, so without this the selection can change
+  // mid-drag and the motion gets applied to a part it was never measured
+  // against -- which shows up as a translate that also rotates.
+  const grab = useRef<{ from: Matrix4; held: { part: Part; at: Matrix4 }[] } | null>(null)
+
+  // With several parts marked the empty sits at the middle of the group, so a
+  // rotation swings them about their shared centre rather than each spinning on
+  // the spot -- which is what picking a set of parts and turning them means.
+  const centreOn = useCallback((group: Part[]) => {
+    if (!group.length || dragging.current) return
+    const middle = new Box3()
+    for (const p of group) {
+      middle.expandByPoint(new Vector3().copy(p.centre).applyMatrix4(p.node.matrixWorld))
+    }
+    middle.getCenter(handle.position)
+    handle.quaternion.identity()
+    handle.scale.set(1, 1, 1)
+    handle.updateMatrixWorld(true)
+  }, [handle])
+
+  /** Carry the empty's motion over to every held part, and read them back out. */
+  const follow = () => {
+    const grabbed = grab.current
+    if (!grabbed) return
+    handle.updateMatrixWorld(true)
+    const motion = new Matrix4()
+      .multiplyMatrices(handle.matrixWorld, new Matrix4().copy(grabbed.from).invert())
+
+    const changes: Record<string, PartEdit> = {}
+    for (const { part, at } of grabbed.held) {
+      const { node } = part
+      new Matrix4()
+        .copy(node.parent!.matrixWorld).invert()
+        .multiply(new Matrix4().multiplyMatrices(motion, at))
+        .decompose(node.position, node.quaternion, node.scale)
+      changes[part.name] = readNode(part, separation, edits[part.name] ?? NO_EDIT)
+    }
+    onEdit?.(changes)
+  }
+
+  // Draw the handles over the model rather than inside it. A part is usually
+  // surrounded by the rest of the assembly -- a door sits within a car body --
+  // so a depth-tested gizmo is buried the moment it is anchored on the part it
+  // edits, which looks exactly like no gizmo at all.
+  useEffect(() => {
+    const root = controls.current as Object3D | null
+    if (!root || !gizmo) return
+    root.traverse((node) => {
+      node.renderOrder = GIZMO_ORDER
+      const held = (node as Mesh).material
+      if (!held) return
+      for (const material of Array.isArray(held) ? held : [held]) {
+        material.depthTest = false
+        material.depthWrite = false
+      }
+    })
+  }, [gizmo, picked])
+
+  // Re-centre on every frame the handle is not being held. The part is moved by
+  // an effect and by the separation slider, both outside React's render, so a
+  // frame is the only moment its transform is reliably settled -- the same
+  // reason the labels are placed here.
+  useFrame(() => {
+    if (!dragging.current) centreOn(picked)
+  })
 
   // A click lands on a mesh, which may be nested well below the part it belongs
   // to, so walk up until a part is reached.
   const owners = useMemo(() => new Map(parts.map((p) => [p.node, p.name])), [parts])
-  const pick = (event: { object: Object3D; stopPropagation: () => void }) => {
+  const pick = (event: {
+    object: Object3D
+    stopPropagation: () => void
+    shiftKey?: boolean
+    ctrlKey?: boolean
+    metaKey?: boolean
+  }) => {
     event.stopPropagation()
+    if (dragging.current) return  // the click that started a drag is not a pick
     let node: Object3D | null = event.object
     while (node && !owners.has(node)) node = node.parent
-    onSelect(node ? owners.get(node)! : null)
+    onSelect(
+      node ? owners.get(node)! : null,
+      Boolean(event.shiftKey || event.ctrlKey || event.metaKey),
+    )
   }
 
   return (
-    <group ref={wrapper} scale={scale} position={[offset.x, offset.y, offset.z]}>
-      <primitive object={scene} onPointerDown={pick} />
-      {labelled.length > 0 && (
-        <PartLabels
-          parts={labelled}
-          names={labelled.map((p) => labels[p.name] ?? p.name)}
-          selected={selected}
-          wrapper={wrapper}
+    <>
+      <group ref={wrapper} scale={scale} position={[offset.x, offset.y, offset.z]}>
+        <primitive object={scene} onPointerDown={pick} />
+        {labelled.length > 0 && (
+          <PartLabels
+            parts={labelled}
+            names={labelled.map((p) => labels[p.name] ?? p.name)}
+            selected={marks}
+            wrapper={wrapper}
+          />
+        )}
+        {picked.map((p) => (
+          <SelectionBox
+            key={p.name} part={p} separation={separation}
+            edit={edits[p.name]} wrapper={wrapper}
+          />
+        ))}
+      </group>
+
+      <primitive object={handle} />
+      {picked.length > 0 && gizmo && onEdit && (
+        <TransformControls
+          ref={controls}
+          object={handle}
+          mode={gizmo}
+          size={GIZMO_SIZE}
+          onMouseDown={() => {
+            dragging.current = true
+            grab.current = {
+              from: handle.matrixWorld.clone(),
+              held: picked.map((p) => ({ part: p, at: p.node.matrixWorld.clone() })),
+            }
+          }}
+          onObjectChange={follow}
+          onMouseUp={() => {
+            follow()
+            dragging.current = false
+            grab.current = null
+          }}
         />
       )}
-      {chosen && <SelectionBox part={chosen} separation={separation} wrapper={wrapper} />}
-    </group>
+    </>
   )
 }
 
@@ -284,36 +603,152 @@ interface Props {
   explodeOpen?: boolean
   /** Part names to show in place of the model's own, keyed by the original. */
   labels?: Record<string, string>
+  /** Moves, rotations, scales and materials to preview, keyed the same way. */
+  edits?: Record<string, PartEdit>
+  /** Fired when a gizmo drag changes the marked parts. Enables the gizmo. */
+  onEdit?: (changes: Record<string, PartEdit>) => void
   /** The picked part, by its original name: labelled and outlined. */
-  selected?: string | null
-  /** Fired when a part is clicked in the viewer, or the background is. */
-  onSelect?: (name: string | null) => void
-  /** The parts this model turned out to have, in the order they are drawn. */
-  onParts?: (names: string[]) => void
+  selected?: readonly string[]
+  /**
+   * Fired when a part is clicked in the viewer, or the background is.
+   * `additive` is set when shift or ctrl/cmd was held: add to the marks
+   * rather than replace them.
+   */
+  onSelect?: (name: string | null, additive: boolean) => void
+  /**
+   * The parts this model turned out to have, in the order they are drawn,
+   * with how far one may usefully be nudged in the space a move applies in.
+   */
+  onParts?: (names: string[], reach: number) => void
   /** False parks the render loop, for a viewer sitting on a hidden tab. */
   active?: boolean
 }
 
 const RESTING_PCT = 40
 const NO_LABELS: Record<string, string> = {}
+const NO_EDITS: Record<string, PartEdit> = {}
+const NO_SELECTION: readonly string[] = []
+
+interface OrbitHandle {
+  target: Vector3
+  update: () => void
+  enableDamping: boolean
+}
+
+interface View {
+  camera: { position: Vector3; lookAt: (x: number, y: number, z: number) => void }
+  controls: OrbitHandle | null
+}
+
+/** Where the camera starts, and where "Reset view" puts it back. */
+const CAMERA_START: [number, number, number] = [1.6, 1.2, 2.0]
+
+/**
+ * Hands the camera out to the chrome around the canvas.
+ *
+ * The buttons are plain DOM outside the r3f tree, so they cannot reach the
+ * camera themselves, and a ref on <OrbitControls> does not reliably arrive.
+ */
+function ViewBridge({ into }: { into: MutableRefObject<View | null> }) {
+  const camera = useThree((state) => state.camera)
+  const controls = useThree((state) => state.controls)
+  useEffect(() => {
+    into.current = { camera, controls: (controls as unknown as OrbitHandle) ?? null }
+  }, [camera, controls, into])
+  return null
+}
+
+const stroke = {
+  fill: 'none', stroke: 'currentColor', strokeWidth: 1.7,
+  strokeLinecap: 'round', strokeLinejoin: 'round',
+} as const
+
+const GIZMOS: { mode: Exclude<GizmoMode, null>; label: string; icon: JSX.Element }[] = [
+  {
+    mode: 'translate',
+    label: 'Move',
+    icon: (
+      <svg width="13" height="13" viewBox="0 0 24 24" {...stroke}>
+        <path d="M12 3v18M3 12h18M12 3 9.5 5.5M12 3l2.5 2.5M12 21l-2.5-2.5M12 21l2.5-2.5" />
+        <path d="M3 12l2.5-2.5M3 12l2.5 2.5M21 12l-2.5-2.5M21 12l-2.5 2.5" />
+      </svg>
+    ),
+  },
+  {
+    mode: 'rotate',
+    label: 'Rotate',
+    icon: (
+      <svg width="13" height="13" viewBox="0 0 24 24" {...stroke}>
+        <path d="M20 12a8 8 0 1 1-2.5-5.8" />
+        <path d="M20 4v4h-4" />
+      </svg>
+    ),
+  },
+  {
+    mode: 'scale',
+    label: 'Scale',
+    icon: (
+      <svg width="13" height="13" viewBox="0 0 24 24" {...stroke}>
+        <rect x="4" y="4" width="9" height="9" rx="1" />
+        <path d="M13 13h7v7h-7M20 13l-3.5 3.5" />
+      </svg>
+    ),
+  },
+]
 
 export default function ModelViewer({
-  url, placeholder, explodeOpen = false,
-  labels = NO_LABELS, selected = null, onSelect, onParts, active = true,
+  url, placeholder, explodeOpen = false, labels = NO_LABELS, edits = NO_EDITS,
+  selected = NO_SELECTION, onSelect, onEdit, onParts, active = true,
 }: Props) {
   const [open, setOpen] = useState(explodeOpen)
   const [pct, setPct] = useState(explodeOpen ? RESTING_PCT : 0)
   const [allNames, setAllNames] = useState(false)
   const [parts, setParts] = useState(0)
+  const [gizmo, setGizmo] = useState<GizmoMode>(null)
+  // Only ever asked to reset, so the concrete controls type is not worth
+  // importing -- drei takes it from three-stdlib, not from @types/three.
+  const view = useRef<View | null>(null)
 
   // Held in a ref so an inline callback from the parent cannot re-fire the
   // report -- which would look to the view like a brand new model, and throw
   // away the names the user has typed.
   const sink = useRef(onParts)
   sink.current = onParts
-  const report = useCallback((names: string[]) => {
+  const report = useCallback((names: string[], reach: number) => {
     setParts(names.length)
-    sink.current?.(names)
+    sink.current?.(names, reach)
+  }, [])
+
+  /**
+   * Put the camera back where it started.
+   *
+   * The framing is set here rather than through the controls' own reset(),
+   * which restores the pose it captured when it was constructed -- before r3f
+   * had moved the camera to where this viewer wanted it, so it lands on a
+   * default view instead of the one the model was first framed in.
+   *
+   * Damping is switched off across the change: the eased rotation left over
+   * from the drag that got you here is held inside the controls and would carry
+   * on turning the camera out of the pose just restored. Without damping the
+   * same update zeroes it.
+   */
+  const resetView = useCallback(() => {
+    const current = view.current
+    if (!current) return
+    const { camera, controls } = current
+    const damped = controls?.enableDamping ?? false
+    if (controls) {
+      // The drag that got you here leaves an eased rotation inside the controls,
+      // and the next update applies it -- on top of whatever pose is set first.
+      // One update with damping off consumes it; the pose is set after that.
+      controls.enableDamping = false
+      controls.update()
+    }
+    camera.position.set(...CAMERA_START)
+    controls?.target.set(0, 0, 0)
+    camera.lookAt(0, 0, 0)
+    controls?.update()
+    if (controls) controls.enableDamping = damped
   }, [])
 
   const toggle = useCallback(() => {
@@ -338,11 +773,12 @@ export default function ModelViewer({
         fallback={<div className="viewer-empty">Preview could not be rendered.<br />The download is still available.</div>}
       >
         <Canvas
-          camera={{ position: [1.6, 1.2, 2.0], fov: 45, near: 0.01, far: 100 }}
+          camera={{ position: CAMERA_START, fov: 45, near: 0.01, far: 100 }}
           dpr={[1, 2]}
           frameloop={active ? 'always' : 'never'}
-          onPointerMissed={() => onSelect?.(null)}
+          onPointerMissed={() => onSelect?.(null, false)}
         >
+          <ViewBridge into={view} />
           <color attach="background" args={['#10131c']} />
           <ambientLight intensity={0.35} />
           <directionalLight position={[4, 6, 4]} intensity={1.5} />
@@ -358,8 +794,11 @@ export default function ModelViewer({
               separation={(pct / 100) * 1.2}
               showAllLabels={allNames}
               labels={labels}
+              edits={edits}
+              gizmo={gizmo}
               selected={selected}
-              onSelect={(name) => onSelect?.(name)}
+              onSelect={(name, additive) => onSelect?.(name, additive)}
+              onEdit={onEdit}
               onParts={report}
             />
           </Suspense>
@@ -375,9 +814,33 @@ export default function ModelViewer({
             infiniteGrid
             position={[0, -0.5, 0]}
           />
-          <OrbitControls makeDefault enableDamping dampingFactor={0.08} />
+          <OrbitControls
+            makeDefault
+            enableDamping
+            dampingFactor={0.08}
+            // A wheel notch at the default speed crosses a good part of the
+            // model, which on an assembly you are picking single parts out of
+            // overshoots constantly. Orbit and pan are eased for the same
+            // reason: the useful gesture here is a small adjustment.
+            zoomSpeed={0.35}
+            rotateSpeed={0.45}
+            panSpeed={0.6}
+          />
         </Canvas>
       </ViewerBoundary>
+
+      <button
+        className="view-reset"
+        title="Put the camera back where it started"
+        onClick={resetView}
+      >
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+             strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+          <path d="M3 12a9 9 0 1 0 2.6-6.4" />
+          <path d="M3 4v5h5" />
+        </svg>
+        Reset view
+      </button>
 
       <button className={`explode-btn${open ? ' on' : ''}`} onClick={toggle}>
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
@@ -418,7 +881,27 @@ export default function ModelViewer({
         </div>
       )}
 
-      <div className="viewer-hint">drag to orbit &middot; scroll to zoom</div>
+      {onEdit && selected.length > 0 && (
+        <div className="gizmo-bar">
+          {GIZMOS.map(({ mode, label, icon }) => (
+            <button
+              key={label}
+              className={`gizmo-btn${gizmo === mode ? ' on' : ''}`}
+              title={`${label} the marked part${selected.length > 1 ? 's' : ''}`}
+              onClick={() => setGizmo((was) => (was === mode ? null : mode))}
+            >
+              {icon}
+              {label}
+            </button>
+          ))}
+        </div>
+      )}
+
+      <div className="viewer-hint">
+        {gizmo && selected.length > 0
+          ? 'drag a handle to edit · drag elsewhere to orbit'
+          : 'drag to orbit · scroll to zoom · shift-click to mark more'}
+      </div>
     </div>
   )
 }

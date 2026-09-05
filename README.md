@@ -88,8 +88,10 @@ assembly, proportionally to how far off-centre it already sits — so the
 arrangement stays recognisable instead of flying into an even starburst. Closing
 the panel puts the model back together.
 
-The **Analysis** tab is built around that view: drop a model in and it goes
-straight to the exploded viewer, with every part listed down the side. Click a
+The **Analysis** tab is built around that view. Loading a model spans the top of
+the tab; underneath, the parts and the editor take the left and the viewer takes
+the right, which is the half you work in. Drop a model in and it goes straight
+to the exploded viewer, with every part listed beside it. Click a
 part — in the viewer or in the list — and that one is named on the model and
 outlined, with its row scrolled into view; click the background to drop the
 selection. Only the selected part is labelled, because a real assembly has
@@ -123,7 +125,92 @@ Three details worth knowing:
   from the list is still visible when it sits inside another one.
 
 Separation is applied in the browser, to the preview GLB, and is only a way of
-looking at the model — it never moves anything in the file you download.
+looking at the model — it never moves anything in the file you download. Edits
+made in the panel below the list, on the other hand, do.
+
+## Marking parts
+
+A click marks one part and drops whatever was marked before; **shift-click**
+(or ctrl/cmd-click) adds one to the marks or takes it away again, in the viewer
+and in the list alike. Clicking the background clears them. Every marked part is
+outlined and named, and the count appears above the list.
+
+Marks are what the editor works on, so several parts can be moved, turned,
+resized or restyled in one go. A group turns and grows about the middle of the
+group rather than each part spinning on its own spot, which is what picking a
+set of parts and rotating them is meant to do.
+
+## Editing a part
+
+Marking a part also opens an editor under the list, for changing those parts
+rather than the whole model: **move** it along each axis, **rotate** it, **scale**
+it per axis, and give it a **material** and a colour. The viewer shows every
+change as it is made, and pressing **Save as** writes them into the file along
+with the names.
+
+Everything in that panel can also be done by hand in the viewport. With a part
+selected, **Move**, **Rotate** and **Scale** in the top-left corner attach a
+gizmo to it, the way Blender or Unity would: drag a handle to edit the part,
+drag anywhere else to orbit. The sliders and the gizmo are two views of the same
+edit and follow each other live. Pressing the active mode again puts the gizmo
+away. With several parts marked the gizmo sits at the middle of the group and
+moves all of them together.
+
+Orbit, pan and zoom are deliberately slower than three.js's defaults. A wheel
+notch at the default speed crosses a good part of the model, which overshoots
+constantly on an assembly you are picking single parts out of. **Reset view**,
+beside the separation button, puts the camera back where it started when you
+have turned yourself around.
+
+The gizmo does not grab the part's own origin. Plenty of exports leave every
+origin on the world origin -- a Sketchfab model wraps each part in an identity
+node and offsets the geometry inside it -- so handles drawn there would sit
+nowhere near the part you clicked, and every part's would sit in the same place.
+An empty stands in at the part's visible centre instead, and its motion is
+passed on. The handles are also drawn over the model rather than inside it: a
+part is usually surrounded by the rest of the assembly, and a depth-tested gizmo
+is buried the moment it is anchored on the part it edits.
+
+- **An edit is a delta on the part's own transform**, so rotation and scale pivot
+  on its origin and compose with whatever pose it was authored with. The axes are
+  the viewer's, and moves are in the model's units. The slider reaches as far as
+  the assembly is wide *measured in the space a move is applied in*, which is not
+  the same as its size on screen: a model wrapped in a scaled root can be a
+  hundredth of a unit across in the world and whole units across in its own.
+- **The preview is not an approximation.** Blender's glTF exporter maps a node's
+  local transform onto glTF's axes componentwise at any depth, so an edit made on
+  screen is swizzled back onto Blender's axes and applied unchanged. What the
+  viewer shows is what the saved file contains, to float precision.
+- **A material replaces the part's own outright**, textures included. The five
+  presets — plastic, metal, glass, matte and glowing — are Principled BSDF
+  settings, and the colour you pick is converted from sRGB so the exported file
+  is the shade you chose. Leave the type on *Keep original* to move a part
+  without touching how it looks.
+- **STL and PLY keep neither names nor materials**, but the moves, rotations and
+  scales still apply, because those are baked into the geometry that is written.
+  OBJ needs every part to carry a material once any part is styled, so unstyled
+  ones are given a plain grey; otherwise they would inherit the styled part's
+  colour from the file's running `usemtl` state.
+- **Part names are the file's own, not the viewer's.** three.js strips `[`, `]`,
+  `.`, `:` and `/` out of glTF node names when it loads them, because its
+  animation binding syntax reserves those characters. Maya and Sketchfab
+  namespace their parts with a colon, so the sanitised name would match nothing
+  on the way back; the viewer recovers the original from the loader's own node
+  mapping and keys edits and renames by that.
+- **A panel showing several parts shows what they agree on.** Any axis they
+  differ on reads as none until you set it, and only the fields you actually
+  move are written across -- otherwise nudging one slider would flatten every
+  other value the parts did not happen to share.
+- **An edit that names no part in the model is reported**, not passed over. If a
+  save comes back with a warning naming parts, those names no longer match the
+  objects the converter found, and nothing was applied to them.
+
+Edits are cleared when a different model is analysed. **Reset** in the editor
+returns the marked parts to how they arrived. Above the list, **Reset names**
+and **Reset edits** each undo one kind for the whole model and leave the other
+alone, so renaming a hundred parts is not lost to undoing a move. Each appears
+only when there is something of its kind to undo, and neither touches what you
+have marked.
 
 ---
 
@@ -346,8 +433,12 @@ curl -F file=@part.stp -F target=.usdz \
 Conversion options: `scale`, `center` (`none`/`origin`/`floor`), `decimate`,
 `triangulate`, `apply_modifiers`, `animations`, `draco` (GLB), `y_up`
 (USD/USDZ), `cad_tolerance` (STEP/IGES), `archive_entry` to pick a specific
-model inside an archive, and `renames` — a `{"old": "new"}` map of part names,
-applied between import and export.
+model inside an archive, `renames` — a `{"old": "new"}` map of part names — and
+`edits`, a map of part name to `{"move": [x, y, z], "rotate": [x, y, z], "scale":
+[x, y, z], "material": "metal", "color": "#ff2200"}`. Both are applied between
+import and export. Every edit field is a delta on the part's own local transform
+in the viewer's glTF-style Y-up axes, not Blender's Z-up; rotations are in
+degrees and scale is a multiplier per axis.
 
 ## Sample models
 
