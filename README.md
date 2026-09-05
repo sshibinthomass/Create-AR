@@ -66,7 +66,7 @@ Frontend (second terminal):
 cd frontend && npm install && npm run dev
 ```
 
-Open <http://localhost:5173>. The dev server proxies `/api` to port 8080.
+Open <http://localhost:5180>. The dev server proxies `/api` to port 8080.
 
 On Windows both halves can be started at once:
 
@@ -85,8 +85,27 @@ python -m uvicorn app.main:app --app-dir backend --port 8080
 
 Then open <http://localhost:8080>.
 
-> The backend defaults to **port 8080**, not 8000, because 8000 collides often.
-> Override with `CONVERTER_PORT` (read by the Vite proxy) and `--port`.
+### Ports
+
+Both defaults are moved off the conventional ones, which collide with almost
+every other project: **8080** for the API (not 8000) and **5180** for the dev
+server (not Vite's 5173).
+
+| Port | Override |
+|---|---|
+| API `8080` | `--port`, and `CONVERTER_PORT` so the Vite proxy follows |
+| UI `5180` | `CONVERTER_UI_PORT` |
+
+With `dev.ps1`, pass both as flags — it refuses to start on a busy port rather
+than drifting silently to another one:
+
+```bash
+powershell -ExecutionPolicy Bypass -File dev.ps1 -Port 9000 -UiPort 5200
+```
+
+> Use `http://localhost:<port>`, not `http://127.0.0.1:<port>` — Vite binds to
+> the `localhost` hostname, which on Windows does not always answer on the
+> IPv4 loopback address.
 
 ## Conversion options
 
