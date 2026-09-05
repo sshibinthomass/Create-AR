@@ -36,6 +36,13 @@ there is no path back from a mesh to parametric CAD.
 Multi-file outputs (`.obj` → `.obj`+`.mtl`+textures, `.gltf` → `.gltf`+`.bin`+textures)
 are returned as a `.zip`.
 
+## Sample models
+
+[`samples/`](samples/) holds one file per supported input format — a materialled,
+animated Suzanne for the mesh formats and a real 60 × 40 × 8 mm CAD bracket for
+STEP/IGES. Drag any of them onto the upload area. See
+[samples/README.md](samples/README.md).
+
 ## Requirements
 
 - **Blender 4.2+** (developed against 5.2 LTS). Found automatically in the standard

@@ -19,3 +19,6 @@ frontend/dist/
 Thumbs.db
 .vscode/
 .idea/
+
+# Sample generation only (not a runtime dependency)
+samples/__pycache__/
