@@ -20,10 +20,13 @@ config.ensure_dirs()
 
 app = FastAPI(title="3D Model Converter", version="1.0.0")
 
-# The Vite dev server runs on a different origin during development.
+# The Vite dev server runs on a different origin during development. 5180 is
+# this project's default; 5173 is Vite's, kept for a manually started server.
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
+    allow_origins=[f"http://{host}:{port}"
+                   for host in ("localhost", "127.0.0.1")
+                   for port in (5180, 5173)],
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -47,6 +50,8 @@ class Options(BaseModel):
     ascii: bool = False
     cad_tolerance: float = Field(0.01, gt=0, le=10)
     cad_angular_tolerance: float = Field(0.5, gt=0, le=5)
+    # Path inside an uploaded archive, when the auto-picked model is not wanted.
+    archive_entry: str = Field("", max_length=512)
 
 
 def safe_stem(filename: str) -> str:

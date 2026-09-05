@@ -12,6 +12,7 @@ dependencies = [
     "uvicorn[standard]>=0.30",
     "python-multipart>=0.0.9",
     "cascadio>=0.1.1",
+    "py7zr>=0.20",
 ]
 
 [project.optional-dependencies]

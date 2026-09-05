@@ -76,18 +76,25 @@ export default function App() {
     return caps?.aliases?.[raw] ?? raw
   }, [file, caps])
 
-  const isCadInput = sourceExt === '.step' || sourceExt === '.iges'
-  const isArchiveInput = sourceExt === '.zip'
+  // Categories come from /api/formats so the UI never hardcodes the list.
+  const categoryOf = useMemo(() => {
+    const m = new Map((caps?.formats ?? []).map((f) => [f.ext, f.category]))
+    return (ext: string) => m.get(ext)
+  }, [caps])
+
+  const isCadInput = categoryOf(sourceExt) === 'cad'
+  const isArchiveInput = categoryOf(sourceExt) === 'archive'
   const busy = uploading || (job != null && ACTIVE.has(job.status))
   const canConvert = !!file && !!health?.ok && !busy && sourceExt !== target
 
-  const convert = useCallback(async () => {
+  const convert = useCallback(async (entryOverride?: string) => {
     if (!file) return
     setError(null)
     setUploading(true)
     setUploadPct(0)
     try {
-      const started = await startConversion(file, target, options, setUploadPct)
+      const opts = entryOverride ? { ...options, archive_entry: entryOverride } : options
+      const started = await startConversion(file, target, opts, setUploadPct)
       setJob(started)
     } catch (e) {
       setError((e as Error).message)
@@ -148,8 +155,9 @@ export default function App() {
               )}
               {isArchiveInput && (
                 <div className="note">
-                  The model is found inside the archive automatically, textures and
-                  sidecars included — so a zipped OBJ keeps its materials.
+                  The model is found inside automatically, wherever it sits and
+                  however deeply it is nested — textures and sidecars included, so
+                  a zipped OBJ keeps its materials.
                 </div>
               )}
             </div>
@@ -202,7 +210,7 @@ export default function App() {
 
           {error && <div className="error-box">{error}</div>}
 
-          <button className="go" disabled={!canConvert} onClick={convert}>
+          <button className="go" disabled={!canConvert} onClick={() => convert()}>
             {uploading
               ? `Uploading ${uploadPct}%`
               : busy
@@ -254,6 +262,29 @@ export default function App() {
                   {stats?.dimensions && (
                     <div style={{ fontSize: 12, color: 'var(--dim)', marginBottom: 10 }}>
                       Bounding box: {stats.dimensions.map((d) => d.toFixed(3)).join(' × ')} m
+                    </div>
+                  )}
+                  {job.archiveEntries.length > 1 && (
+                    <div className="entries">
+                      <div className="entries-head">
+                        {job.archiveEntries.length} models in this archive — converted{' '}
+                        <code>{job.archiveEntry}</code>
+                      </div>
+                      {job.archiveEntries
+                        .filter((e) => e !== job.archiveEntry)
+                        .slice(0, 8)
+                        .map((e) => (
+                          <button
+                            key={e}
+                            className="entry"
+                            disabled={busy || !file}
+                            onClick={() => convert(e)}
+                            title={`Convert ${e} instead`}
+                          >
+                            <span className="entry-path">{e}</span>
+                            <span className="entry-go">convert this →</span>
+                          </button>
+                        ))}
                     </div>
                   )}
                   {job.warnings.map((w, i) => <div className="warn-box" key={i} style={{ marginBottom: 8 }}>{w}</div>)}

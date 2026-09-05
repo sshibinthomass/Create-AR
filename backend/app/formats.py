@@ -58,10 +58,14 @@ FORMATS: tuple[Format, ...] = (
     Format(".iges", "IGES", "cad", "opencascade", True, False,
            "model/iges", "B-rep is tessellated on import; tolerance is adjustable."),
 
-    # --- archive (a bundle of one of the above plus its textures) ---
+    # --- archives (a bundle of one of the above plus its textures) ---
     Format(".zip", "Zip archive", "archive", "archive", True, False,
            "application/zip",
            "Model plus its textures and sidecars. The model is found automatically."),
+    Format(".7z", "7-Zip archive", "archive", "archive", True, False,
+           "application/x-7z-compressed", "Unpacked the same way as .zip."),
+    Format(".tar", "Tar archive", "archive", "archive", True, False,
+           "application/x-tar", "Also .tar.gz / .tgz / .tar.bz2 / .tar.xz."),
 )
 
 BY_EXT: dict[str, Format] = {f.ext: f for f in FORMATS}
@@ -70,6 +74,13 @@ BY_EXT: dict[str, Format] = {f.ext: f for f in FORMATS}
 ALIASES: dict[str, str] = {
     ".stp": ".step",
     ".igs": ".iges",
+    # Compressed tarballs: Path.suffix only sees the trailing part.
+    ".tgz": ".tar",
+    ".gz": ".tar",
+    ".bz2": ".tar",
+    ".xz": ".tar",
+    ".tbz": ".tar",
+    ".txz": ".tar",
 }
 
 CAD_EXTS = {f.ext for f in FORMATS if f.category == "cad"}

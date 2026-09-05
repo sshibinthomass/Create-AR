@@ -283,3 +283,29 @@ input[type='range'] { width: 110px; accent-color: var(--accent); }
 .pill.running, .pill.queued { background: rgba(91, 140, 255, .15); color: var(--accent); }
 
 .empty { padding: 26px 16px; text-align: center; color: var(--dim); font-size: 13px; }
+
+/* ---------- archive entry picker ---------- */
+
+.entries {
+  margin-bottom: 12px; padding: 10px 12px; border-radius: 9px;
+  background: var(--panel-2); border: 1px solid var(--line);
+}
+.entries-head { font-size: 12px; color: var(--muted); margin-bottom: 8px; }
+.entries-head code {
+  font: 11px/1.4 ui-monospace, Menlo, Consolas, monospace;
+  background: var(--panel); padding: 1px 5px; border-radius: 4px; color: var(--text);
+}
+.entry {
+  display: flex; align-items: center; justify-content: space-between; gap: 10px;
+  width: 100%; text-align: left; margin-top: 5px;
+  padding: 7px 9px; border-radius: 7px;
+  background: var(--panel); border: 1px solid var(--line-soft); color: var(--muted);
+  font-size: 12px;
+}
+.entry:hover:not(:disabled) { border-color: var(--accent); color: var(--text); }
+.entry:disabled { opacity: .45; }
+.entry-path {
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 11px;
+}
+.entry-go { flex: none; color: var(--accent); font-size: 11px; }

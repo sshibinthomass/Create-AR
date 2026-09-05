@@ -25,7 +25,7 @@ This is the `Convert` stage of the larger [Create-AR Studio plan](PLAN.md).
 | `.blend`           |  ✅   |   —    | Blender |
 | **STEP** (`.step`, `.stp`) | ✅ | — | OpenCASCADE → Blender |
 | **IGES** (`.iges`, `.igs`) | ✅ | — | OpenCASCADE → Blender |
-| **ZIP** archive | ✅ | — | unpacked, then as above |
+| **Archives** — `.zip`, `.7z`, `.tar`, `.tar.gz`/`.tgz`, `.tar.bz2`, `.tar.xz` | ✅ | — | unpacked, then as above |
 
 CAD is **input-only**: the pipeline tessellates B-rep surfaces into meshes, and
 there is no path back from a mesh to parametric CAD.
@@ -37,23 +37,29 @@ there is no path back from a mesh to parametric CAD.
 Multi-file outputs (`.obj` → `.obj`+`.mtl`+textures, `.gltf` → `.gltf`+`.bin`+textures)
 are returned as a `.zip`.
 
-## Zip archives
+## Archives
 
-Upload the `.zip` a model marketplace gave you and the model inside is found
+Upload the archive a model marketplace gave you and the model inside is found
 automatically. This is usually **better** than uploading the model on its own,
 because an OBJ needs its `.mtl` and a glTF needs its `.bin` and textures —
-extracting keeps them together so those references resolve.
+unpacking keeps them together so those references resolve.
 
-Both common layouts work:
+Nothing about the layout is assumed. The model is located wherever it happens to
+sit — any depth, any folder naming, spaces and all — and archives nested inside
+archives are opened recursively (up to 4 deep) while nothing has turned up yet,
+including mixed chains like `.zip` → `.tar.gz` → `.zip`.
 
-```
-scene.gltf + scene.bin + textures/      model at the top level
-source/Thing.zip + textures/            real source inside a nested archive
-```
+The container format is detected from its **magic bytes, not its extension**, so
+a tarball misnamed `.zip` still works. Supported: zip, 7z, and the tar family
+(plain, gzip, bzip2, xz). RAR is detected and reported as unsupported rather
+than failing obscurely — it needs a non-redistributable binary.
 
 When several models are present the most capable one wins (glTF/GLB, then FBX,
-then OBJ, …), preferring shallower paths. The download is named after the model
-found inside, not the archive.
+then OBJ, …), preferring shallower paths and larger files. **Every candidate is
+reported**, and the result panel lets you convert a different one with a click,
+so a wrong guess is never a dead end. Via the API, pass
+`options={"archive_entry": "hero/model.glb"}`. The download is named after the
+model found inside, not the archive.
 
 **Broken texture paths are repaired.** Distributed archives very often ship an
 `.mtl` full of the original author's absolute paths (`map_Kd
@@ -63,8 +69,10 @@ filename* elsewhere in the upload, and the job log says how many were relinked.
 Matching is by exact filename only, so a wrong image is never substituted — a
 texture referenced as `.jpeg` when the archive ships `.png` stays unresolved.
 
-Extraction refuses path traversal (`../`, absolute paths, drive letters),
-symlinks, more than 4,000 entries, and anything expanding past 2 GB.
+Extraction **refuses rather than sanitises**: path traversal (`../`, absolute
+paths, drive letters, backslash separators), symlink and device entries, more
+than 4,000 entries, and anything expanding past 2 GB. A password-protected 7z is
+reported plainly.
 
 ## Sample models
 
@@ -192,7 +200,7 @@ curl -F file=@part.stp -F target=.usdz \
 .venv/Scripts/python -m pytest backend/tests -q
 ```
 
-42 tests, covering format/alias resolution, upload validation, filename
+56 tests, covering format/alias resolution, upload validation, filename
 sanitisation, archive extraction safety (zip-slip, symlinks, entry floods,
 decompression bombs), model selection inside archives, texture relinking, and
 real Blender conversions: STL → GLB/USDZ/FBX/OBJ, STEP → USDZ, zipped OBJ with

@@ -106,20 +106,46 @@ geometry in a `.bin`, so uploading either of those files alone silently loses
 data. Extracting preserves the directory structure, which is what makes the
 relative references inside those files resolve.
 
-Two layouts are handled, both standard on model marketplaces:
+### Containers
 
-| Layout | Example |
-|---|---|
-| Model at the top level | `scene.gltf` + `scene.bin` + `textures/` |
-| Real source in a nested zip | `source/FINAL_MODEL_23.zip` + `textures/` |
+Detection is by magic bytes, never by extension, because archives are routinely
+misnamed:
 
-Nested archives are opened one level deep, and only when the top level holds no
-model of its own. A `source/` folder is searched first, being the conventional
-home for the original.
+| Container | Detected by | Library |
+|---|---|---|
+| zip | `PK` | `zipfile` |
+| 7z | `7z¼¯'` | `py7zr` |
+| gzip / bzip2 / xz tarball | ``, `BZh`, `ý7zXZ` | `tarfile` |
+| plain tar | `ustar` at offset 257 | `tarfile` |
+| RAR | `Rar!` | *reported as unsupported* |
+
+RAR is deliberately identified so the error names the problem; supporting it
+would mean shipping a non-redistributable `unrar` binary.
+
+7z has no per-member streaming API, so it is handled separately: every name is
+validated and the declared sizes are summed *before* a byte is written, then the
+archive is expanded in one call.
+
+### Layout
+
+No layout is assumed. Models are found by walking the whole tree, so wrapper
+folders, spaces, and arbitrary nesting are all irrelevant. Archives inside
+archives are opened recursively to `MAX_DEPTH` (4) while nothing has been found
+yet, which handles mixed chains such as `.zip` → `.tar.gz` → `.zip`. A `source/`
+folder is tried first, being the conventional home for an original.
+
+Recursion stops as soon as a model turns up: if the top level already offers one
+there is no reason to spend time unpacking a bundle's extras.
+
+USDZ is itself a zip, so containers are only recursed into when they are *not* a
+recognised model format — otherwise a `.usdz` would be torn open instead of
+converted.
 
 Selection between multiple candidates is by format preference (GLB, glTF, FBX,
 OBJ, blend, USD, Alembic, STL, PLY, STEP, IGES), then shallowest path, then
-largest file. `__MACOSX/` entries and `._` resource forks are ignored.
+largest file. `__MACOSX/` entries and `._` resource forks are ignored. Every
+candidate is returned, not just the winner, so the caller can override the pick
+via `options.archive_entry` — the UI turns that into a one-click list.
 
 ### Extraction safety
 
@@ -131,9 +157,16 @@ largest file. `__MACOSX/` entries and `._` resource forks are ignored.
 - **Symlinks** — entries whose Unix mode marks them `S_IFLNK` are skipped, so a
   link cannot be materialised pointing outside the sandbox.
 - **Entry floods** — more than `MAX_ENTRIES` (4,000).
-- **Decompression bombs** — the declared uncompressed total is checked up front
-  against the budget, and the running total is checked again while writing, so a
-  lying central directory does not get a free pass.
+- **Decompression bombs** — the running total is checked while writing, and for
+  7z the declared total is checked up front, so a lying central directory does
+  not get a free pass. The budget is shared across nesting levels, so recursion
+  cannot multiply it.
+- **Encrypted archives** — a password-protected 7z is reported plainly rather
+  than failing deep inside the library.
+
+Absolute paths are *refused*, not stripped. Most unzip tools quietly rewrite
+`/etc/passwd` to `etc/passwd`; here it aborts, because an absolute path in a
+distributed model bundle is a red flag worth surfacing to whoever uploaded it.
 
 ### Texture relinking
 

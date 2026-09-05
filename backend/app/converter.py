@@ -29,6 +29,8 @@ class Result:
     source_stats: dict | None = None
     result_stats: dict | None = None
     warnings: list[str] = field(default_factory=list)
+    archive_entries: list[str] = field(default_factory=list)  # models found inside
+    archive_entry: str | None = None                          # the one converted
 
 
 def tessellate_cad(src: Path, dst: Path, options: dict) -> None:
@@ -167,17 +169,24 @@ def convert(
 
     stem_override: str | None = None
     texture_root: Path | None = None
+    entries: list[str] = []
+    entry: str | None = None
     if src_ext in formats.ARCHIVE_EXTS:
         on_progress(4, "Unpacking archive")
         try:
-            source, notes = archives.extract_model(source, work)
+            found = archives.extract_model(
+                source, work, prefer=options.get("archive_entry") or None)
         except ArchiveError as exc:
             raise ConversionError(str(exc)) from exc
-        for note in notes:
+        for note in found.notes:
             on_log(note)
+        root = work / "archive"
+        entries = [p.relative_to(root).as_posix() for p in found.candidates]
+        entry = found.model.relative_to(root).as_posix()
+        source = found.model
         # Name the download after the model inside, not "archive.glb".
         stem_override = source.stem
-        texture_root = work / "archive"
+        texture_root = root
         src_ext = formats.canonical(source.suffix)
         if not formats.is_supported_input(src_ext):
             raise ConversionError(f"'{src_ext}' inside the archive is not a supported input.")
@@ -223,4 +232,6 @@ def convert(
         source_stats=stats.get("source"),
         result_stats=stats.get("result"),
         warnings=collected["warnings"],
+        archive_entries=entries,
+        archive_entry=entry,
     )

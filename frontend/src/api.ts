@@ -1,8 +1,8 @@
 export interface Format {
   ext: string
   label: string
-  category: 'mesh' | 'cad' | 'scene'
-  engine: 'blender' | 'opencascade'
+  category: 'mesh' | 'cad' | 'scene' | 'archive'
+  engine: 'blender' | 'opencascade' | 'archive'
   can_import: boolean
   can_export: boolean
   mime: string
@@ -51,6 +51,8 @@ export interface Job {
   outputSize: number | null
   sourceStats: Stats | null
   resultStats: Stats | null
+  archiveEntries: string[]
+  archiveEntry: string | null
   hasPreview: boolean
   log: string[]
 }
@@ -65,6 +67,8 @@ export interface ConvertOptions {
   draco: boolean
   y_up: boolean
   cad_tolerance: number
+  /** Path inside an archive, when the auto-picked model is not the wanted one. */
+  archive_entry?: string
 }
 
 export const DEFAULT_OPTIONS: ConvertOptions = {

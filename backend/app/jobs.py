@@ -40,6 +40,8 @@ class Job:
     output_size: int | None = None
     source_stats: dict | None = None
     result_stats: dict | None = None
+    archive_entries: list[str] = field(default_factory=list)
+    archive_entry: str | None = None
 
     def public(self) -> dict:
         return {
@@ -58,6 +60,8 @@ class Job:
             "outputSize": self.output_size,
             "sourceStats": self.source_stats,
             "resultStats": self.result_stats,
+            "archiveEntries": self.archive_entries,
+            "archiveEntry": self.archive_entry,
             "hasPreview": self.status == "done" and self.preview_path().exists(),
             "log": self.log[-MAX_LOG_LINES:],
         }
@@ -162,6 +166,8 @@ class JobStore:
             source_stats=result.source_stats,
             result_stats=result.result_stats,
             warnings=result.warnings,
+            archive_entries=result.archive_entries,
+            archive_entry=result.archive_entry,
         )
 
     def sweep(self) -> int:

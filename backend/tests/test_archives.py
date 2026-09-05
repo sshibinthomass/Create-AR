@@ -68,7 +68,7 @@ def test_decompression_bomb_is_refused(tmp_path):
 def test_corrupt_zip_reports_clearly(tmp_path):
     bad = tmp_path / "bad.zip"
     bad.write_bytes(b"PK\x03\x04 this is not really a zip")
-    with pytest.raises(ArchiveError, match="corrupt or not a zip"):
+    with pytest.raises(ArchiveError, match="corrupt or unreadable"):
         archives.safe_extract(bad, tmp_path / "out")
 
 
@@ -106,7 +106,7 @@ def test_picks_preferred_format_when_several_present(tmp_path):
         "model.obj": b"v 0 0 0\n",
         "model.glb": b"glTF\x02\x00\x00\x00",
     })
-    model, _ = archives.extract_model(archive, tmp_path / "work")
+    model = archives.extract_model(archive, tmp_path / "work").model
     assert model.name == "model.glb"  # glb outranks obj outranks stl
 
 
@@ -115,7 +115,7 @@ def test_shallower_model_wins_over_deeper(tmp_path):
         "deep/nested/model.obj": b"v 0 0 0\n",
         "model.obj": b"v 1 1 1\n",
     })
-    model, _ = archives.extract_model(archive, tmp_path / "work")
+    model = archives.extract_model(archive, tmp_path / "work").model
     assert model.parent.name == "archive"
 
 
@@ -128,7 +128,8 @@ def test_nested_archive_is_opened_when_top_level_has_no_model(tmp_path):
         "source/Thing.zip": inner.getvalue(),
         "textures/albedo.png": b"\x89PNG",
     })
-    model, notes = archives.extract_model(archive, tmp_path / "work")
+    found = archives.extract_model(archive, tmp_path / "work")
+    model, notes = found.model, found.notes
     assert model.name == "Thing.obj"
     # The .mtl has to be a sibling, or Blender cannot resolve materials.
     assert (model.parent / "Thing.mtl").exists()
@@ -147,5 +148,139 @@ def test_zip_is_not_itself_treated_as_a_model(tmp_path):
     with zipfile.ZipFile(inner, "w") as zf:
         zf.writestr("Thing.obj", b"v 0 0 0\n")
     archive = make_zip(tmp_path / "outer.zip", {"source/Thing.zip": inner.getvalue()})
-    model, _ = archives.extract_model(archive, tmp_path / "work")
+    model = archives.extract_model(archive, tmp_path / "work").model
     assert model.suffix == ".obj"
+
+
+# --- container formats -------------------------------------------------------
+
+def _tar(path: Path, entries: dict[str, bytes], mode: str = "w") -> Path:
+    import io as _io
+    import tarfile
+    with tarfile.open(path, mode) as tf:
+        for name, data in entries.items():
+            info = tarfile.TarInfo(name)
+            info.size = len(data)
+            tf.addfile(info, _io.BytesIO(data))
+    return path
+
+
+@pytest.mark.parametrize("suffix,mode", [
+    (".tar", "w"), (".tar.gz", "w:gz"), (".tar.bz2", "w:bz2"), (".tar.xz", "w:xz"),
+])
+def test_tar_family_is_unpacked(tmp_path, suffix, mode):
+    archive = _tar(tmp_path / f"bundle{suffix}",
+                   {"model.obj": b"v 0 0 0\n", "model.mtl": b"newmtl m\n"}, mode)
+    model = archives.extract_model(archive, tmp_path / "work").model
+    assert model.name == "model.obj"
+    assert (model.parent / "model.mtl").exists()
+
+
+def test_sevenzip_is_unpacked(tmp_path):
+    py7zr = pytest.importorskip("py7zr")
+    archive = tmp_path / "bundle.7z"
+    with py7zr.SevenZipFile(archive, "w") as zf:
+        src = tmp_path / "model.obj"
+        src.write_bytes(b"v 0 0 0\n")
+        zf.write(src, "model.obj")
+    model = archives.extract_model(archive, tmp_path / "work").model
+    assert model.name == "model.obj"
+
+
+def test_format_is_detected_from_content_not_extension(tmp_path):
+    """A tarball named .zip must still be unpacked."""
+    archive = _tar(tmp_path / "mislabelled.zip", {"model.obj": b"v 0 0 0\n"}, "w:gz")
+    model = archives.extract_model(archive, tmp_path / "work").model
+    assert model.name == "model.obj"
+
+
+def test_rar_is_reported_as_unsupported(tmp_path):
+    bad = tmp_path / "thing.rar"
+    bad.write_bytes(b"Rar!\x1a\x07\x00" + b"\x00" * 64)
+    with pytest.raises(ArchiveError, match="RAR archives are not supported"):
+        archives.safe_extract(bad, tmp_path / "out")
+
+
+def test_tar_symlink_entries_are_skipped(tmp_path):
+    import tarfile
+    archive = tmp_path / "links.tar"
+    with tarfile.open(archive, "w") as tf:
+        link = tarfile.TarInfo("escape")
+        link.type = tarfile.SYMTYPE
+        link.linkname = "/etc/passwd"
+        tf.addfile(link)
+        import io as _io
+        data = b"v 0 0 0\n"
+        info = tarfile.TarInfo("model.obj")
+        info.size = len(data)
+        tf.addfile(info, _io.BytesIO(data))
+    out = tmp_path / "out"
+    archives.safe_extract(archive, out)
+    assert not (out / "escape").exists()
+    assert (out / "model.obj").exists()
+
+
+# --- arbitrary layouts -------------------------------------------------------
+
+def test_deeply_nested_archives_are_opened(tmp_path):
+    """zip inside zip inside zip, with no model until the bottom."""
+    innermost = io.BytesIO()
+    with zipfile.ZipFile(innermost, "w") as zf:
+        zf.writestr("Final.obj", b"v 0 0 0\n")
+    mid = io.BytesIO()
+    with zipfile.ZipFile(mid, "w") as zf:
+        zf.writestr("level3.zip", innermost.getvalue())
+    outer = io.BytesIO()
+    with zipfile.ZipFile(outer, "w") as zf:
+        zf.writestr("level2.zip", mid.getvalue())
+    archive = make_zip(tmp_path / "level1.zip", {"nested/level2.zip": outer.getvalue()})
+
+    model = archives.extract_model(archive, tmp_path / "work").model
+    assert model.name == "Final.obj"
+
+
+def test_model_under_an_arbitrary_wrapper_folder(tmp_path):
+    """The single-folder wrapper most archives have must not matter."""
+    archive = make_zip(tmp_path / "w.zip", {
+        "My Model v2 (final)/assets/geo/thing.fbx": b"Kaydara FBX Binary\x00",
+        "My Model v2 (final)/readme.txt": b"hi",
+    })
+    model = archives.extract_model(archive, tmp_path / "work").model
+    assert model.name == "thing.fbx"
+
+
+def test_usdz_inside_an_archive_is_a_model_not_a_container(tmp_path):
+    """USDZ is itself a zip; it must never be recursed into."""
+    usdz = io.BytesIO()
+    with zipfile.ZipFile(usdz, "w") as zf:
+        zf.writestr("scene.usdc", b"PXR-USDC")
+    archive = make_zip(tmp_path / "outer.zip", {"thing.usdz": usdz.getvalue()})
+    found = archives.extract_model(archive, tmp_path / "work")
+    assert found.model.name == "thing.usdz"
+
+
+def test_all_candidates_are_reported(tmp_path):
+    archive = make_zip(tmp_path / "many.zip", {
+        "a/first.obj": b"v 0 0 0\n",
+        "b/second.stl": CUBE_STL.read_bytes(),
+        "c/third.ply": b"ply\n",
+    })
+    found = archives.extract_model(archive, tmp_path / "work")
+    assert len(found.candidates) == 3
+    assert any("also contains" in n for n in found.notes)
+
+
+def test_explicit_entry_overrides_the_automatic_pick(tmp_path):
+    archive = make_zip(tmp_path / "pick.zip", {
+        "preview/low.obj": b"v 0 0 0\n",
+        "hero/high.obj": b"v 1 1 1\n",
+    })
+    found = archives.extract_model(archive, tmp_path / "work", prefer="hero/high.obj")
+    assert found.model.name == "high.obj"
+    assert found.model.parent.name == "hero"
+
+
+def test_unknown_entry_lists_the_real_ones(tmp_path):
+    archive = make_zip(tmp_path / "pick.zip", {"a.obj": b"v 0 0 0\n"})
+    with pytest.raises(ArchiveError, match="not one of the models"):
+        archives.extract_model(archive, tmp_path / "work", prefer="nope.obj")
