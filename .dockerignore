@@ -1,0 +1,14 @@
+.git
+.claude
+.venv
+**/node_modules
+**/dist
+**/__pycache__
+**/*.egg-info
+**/.pytest_cache
+backend/data
+backend/tests/_data
+samples
+docs
+*.md
+dev.ps1

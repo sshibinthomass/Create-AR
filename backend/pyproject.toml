@@ -11,6 +11,9 @@ dependencies = [
     "fastapi>=0.115",
     "uvicorn[standard]>=0.30",
     "python-multipart>=0.0.9",
+    # cascadio needs numpy at runtime but does not declare it, so a clean
+    # install silently loses STEP/IGES support. Pinned here deliberately.
+    "numpy>=1.24",
     "cascadio>=0.1.1",
     "py7zr>=0.20",
 ]
