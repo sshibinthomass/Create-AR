@@ -278,6 +278,24 @@ def find_models(root: Path) -> list[Path]:
     return sorted(found, key=lambda p: _rank(p, root))
 
 
+def _unsupported_models(root: Path) -> list[tuple[str, str]]:
+    """Models under ``root`` we recognise but cannot import.
+
+    Each entry pairs the member's file name with the advice for that format.
+    Only the name is reported: the path here runs through the ``_unpacked``
+    folders this module invents for nested archives, which mean nothing to
+    whoever built the archive.
+    """
+    out = []
+    for p in sorted(root.rglob("*")):
+        if not p.is_file() or _is_junk(str(p)):
+            continue
+        note = formats.unsupported_note(p.suffix)
+        if note:
+            out.append((p.name, note))
+    return out
+
+
 def _nested_archives(root: Path) -> list[Path]:
     """Archives inside the tree, excluding model formats that happen to be zips.
 
@@ -341,12 +359,26 @@ def extract_model(archive: Path, workdir: Path,
         models = find_models(root)
 
     if not models:
+        supported = ", ".join(
+            e for e in formats.input_exts() if e not in formats.ARCHIVE_EXTS)
+        # A recognised-but-unimportable model is the common case -- a "source"
+        # download of the author's original file. Say which one it is and what
+        # to fetch instead, rather than listing every extension in the archive.
+        blocked = _unsupported_models(root)
+        if blocked:
+            name, note = blocked[0]
+            others = (f" (and {len(blocked) - 1} more like it)"
+                      if len(blocked) > 1 else "")
+            raise ArchiveError(
+                f"The only model in that archive is {name}{others}. "
+                f"{note} Supported: {supported}"
+            )
+
         listing = sorted({p.suffix.lower() for p in root.rglob("*") if p.is_file()})
         raise ArchiveError(
             "No convertible model was found in that archive"
             + (f" (it contains: {', '.join(x for x in listing if x)[:120]})" if listing else "")
-            + ". Supported: "
-            + ", ".join(e for e in formats.input_exts() if e not in formats.ARCHIVE_EXTS)
+            + ". Supported: " + supported
         )
 
     chosen = models[0]

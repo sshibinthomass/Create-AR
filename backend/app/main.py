@@ -255,10 +255,13 @@ async def create_conversion(
 
     source_ext = formats.canonical(Path(file.filename or "").suffix)
     if not formats.is_supported_input(source_ext):
+        # A format we know by name gets told why, and what to upload instead.
+        note = formats.unsupported_note(source_ext)
         raise HTTPException(
             400,
-            f"'{source_ext or file.filename}' is not a supported input format. "
-            f"Accepted: {', '.join(formats.input_exts())}",
+            (note or f"'{source_ext or file.filename}' is not a supported "
+                     f"input format.")
+            + f" Accepted: {', '.join(formats.input_exts())}",
         )
 
     try:

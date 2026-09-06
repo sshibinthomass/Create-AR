@@ -142,6 +142,41 @@ def test_archive_without_a_model_reports_clearly(tmp_path):
         archives.extract_model(archive, tmp_path / "work")
 
 
+def test_collada_archive_names_the_format_and_the_way_out(tmp_path):
+    """The Sketchfab "source" download: a real model, in a format we cannot read."""
+    archive = make_zip(tmp_path / "chair.zip", {
+        "source/model.dae": b"<COLLADA/>",
+        "textures/albedo.png": b"\x89PNG",
+    })
+    with pytest.raises(ArchiveError) as exc:
+        archives.extract_model(archive, tmp_path / "work")
+    msg = str(exc.value)
+    assert "model.dae" in msg
+    assert "COLLADA" in msg
+    assert "GLB" in msg          # says what to fetch instead
+    assert "No convertible model" not in msg   # the vaguer message stays away
+
+
+def test_unsupported_model_is_found_through_a_nested_archive(tmp_path):
+    """The real shape of the bug: the .dae sits inside source/model.zip."""
+    inner = io.BytesIO()
+    with zipfile.ZipFile(inner, "w") as zf:
+        zf.writestr("model/model.dae", b"<COLLADA/>")
+    archive = make_zip(tmp_path / "chair.zip", {"source/model.zip": inner.getvalue()})
+    with pytest.raises(ArchiveError, match="COLLADA"):
+        archives.extract_model(archive, tmp_path / "work")
+
+
+def test_supported_model_wins_over_an_unsupported_sibling(tmp_path):
+    """A .dae beside a .obj is irrelevant -- the .obj converts, no error."""
+    archive = make_zip(tmp_path / "both.zip", {
+        "source/model.dae": b"<COLLADA/>",
+        "Thing.obj": b"v 0 0 0\n",
+    })
+    found = archives.extract_model(archive, tmp_path / "work")
+    assert found.model.name == "Thing.obj"
+
+
 def test_zip_is_not_itself_treated_as_a_model(tmp_path):
     """A .zip is a supported *upload*, but never the model chosen inside one."""
     inner = io.BytesIO()

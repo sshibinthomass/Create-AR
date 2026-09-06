@@ -83,6 +83,23 @@ ALIASES: dict[str, str] = {
     ".txz": ".tar",
 }
 
+# Model formats we recognise but cannot import. Naming them beats a bare
+# "unsupported": the file plainly is a model, so the useful answer is which
+# download to fetch instead. These are what a marketplace hands out as the
+# author's original "source" upload, Collada most often of all.
+UNSUPPORTED_INPUTS: dict[str, tuple[str, str]] = {
+    ".dae": ("COLLADA",
+             "Blender 5.x removed the Collada importer. Download the glTF or "
+             "GLB version instead -- Collada exports also tend to drop their "
+             "texture bindings, so the .glb is the better file anyway."),
+    ".3ds": ("3D Studio", "Re-export it as .glb, .fbx or .obj."),
+    ".max": ("3ds Max", "A .max file only opens in 3ds Max. "
+                        "Re-export it as .glb, .fbx or .obj."),
+    ".c4d": ("Cinema 4D", "A .c4d file only opens in Cinema 4D. "
+                          "Re-export it as .glb, .fbx or .obj."),
+    ".skp": ("SketchUp", "Re-export it as .glb, .fbx or .obj."),
+}
+
 CAD_EXTS = {f.ext for f in FORMATS if f.category == "cad"}
 ARCHIVE_EXTS = {f.ext for f in FORMATS if f.category == "archive"}
 
@@ -116,6 +133,15 @@ def is_supported_input(ext: str) -> bool:
 def is_supported_output(ext: str) -> bool:
     fmt = BY_EXT.get(canonical(ext))
     return bool(fmt and fmt.can_export)
+
+
+def unsupported_note(ext: str) -> str | None:
+    """Why ``ext`` is refused and what to supply instead, if we recognise it."""
+    entry = UNSUPPORTED_INPUTS.get(canonical(ext))
+    if entry is None:
+        return None
+    label, advice = entry
+    return f"{label} ({canonical(ext)}) is not a supported input format. {advice}"
 
 
 def describe() -> dict:

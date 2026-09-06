@@ -70,6 +70,18 @@ def test_rejects_unsupported_input_extension():
     assert "not a supported input" in r.json()["detail"]
 
 
+def test_collada_upload_is_told_what_to_upload_instead():
+    r = client.post(
+        "/api/convert",
+        files={"file": ("model.dae", b"<COLLADA/>", "model/vnd.collada+xml")},
+        data={"target": ".glb"},
+    )
+    assert r.status_code == 400
+    detail = r.json()["detail"]
+    assert "COLLADA" in detail
+    assert "GLB" in detail
+
+
 def test_rejects_unsupported_output_extension():
     r = client.post(
         "/api/convert",
