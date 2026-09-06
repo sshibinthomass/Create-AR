@@ -55,6 +55,50 @@ export function numbered(
 }
 
 /**
+ * Ask the model about one part, on its own.
+ *
+ * The same request the batch run makes, for a single part: the dialog for one
+ * component needs to be able to re-ask about that component without putting a
+ * hundred-part assembly through the renderer again. `total` and `taken` still
+ * travel, because "one of 112" and "these names are already used" are what stop
+ * the answer being a guess made in isolation.
+ */
+export async function nameOnePart(
+  url: string,
+  index: number,
+  /** How many parts the model has, so the request can say where this one sits. */
+  total: number,
+  /** The names the other parts are going by, so the answer avoids repeating one. */
+  taken: readonly string[],
+  settings: NamerSettings,
+): Promise<{ name: string; details: PartDetails }> {
+  const { openStudio } = await import('./partShots')
+  const studio = await openStudio(url)
+  if (!studio) throw new Error('This model has no separate parts to name.')
+  let shot: PartShotPayload
+  try {
+    if (index >= studio.names.length) {
+      throw new Error('The model changed while this part was being rendered.')
+    }
+    shot = {
+      index,
+      name: studio.names[index],
+      isolated: studio.isolated(index),
+      context: settings.context_shot ? studio.inContext(index) : '',
+    }
+  } finally {
+    studio.close()
+  }
+
+  const reply = await nameParts(
+    [shot], Math.max(total, 1), taken.slice(-RECENT_NAMES), settings.describe)
+  const named = reply.names.find((n) => n.index === index) ?? reply.names[0]
+  if (!named) throw new Error('The model did not name this part.')
+  return { name: named.name, details: named.details ?? {} }
+}
+
+
+/**
  * Render every part, then ask the model what each one is.
  *
  * The parts are cut into chunks -- one part each, or `batch_size` of them -- and

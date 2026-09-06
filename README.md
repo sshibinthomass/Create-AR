@@ -250,6 +250,36 @@ an edit through the same code, which is what keeps them agreeing with each other
 and with the exporter. A *move* is the one edit it cannot show — the framing
 follows the part, so sliding the part around leaves the picture unchanged.
 
+### One part at a time
+
+Clicking that preview — or the ⤢ on the part's row, or on its details
+card — opens the part on its own, full size, which is where a single component
+is worked on rather than a whole assembly:
+
+- **Its name and its description, as fields.** The description is a list of
+  label/text pairs, added and dropped one at a time, because that is the shape
+  the document stores and the shape the model answers in. Both are a draft until
+  **Save name & description**, and the dialog says *Unsaved* while they differ
+  from the part.
+- **Describe with AI** points the namer at this one part instead of the model.
+  It renders the part, sends it with how many parts the model has and what the
+  others are called, and writes the answer *into the draft* — so a generated
+  name and description are edited and saved like any typed ones. Correcting one
+  part costs one request, not another run over the assembly.
+- **The same move, rotate, scale and restyling sliders** as the panel under the
+  list — including opacity — applied live, with the render beside them
+  redrawing as you drag.
+- **Delete part**, which leaves the component out of the model you save.
+
+Deleting is a mark, not a cut. The part is hidden in the viewer, struck through
+in the list and left out of `parts.json`, but it stays in the file you opened
+and in the list — **Restore** on its row, or **Restore all** above the list,
+puts it back, and its name, description and edits are all still on it when it
+returns. Only on save does the object actually go, along with everything
+parented under it; the names and edits belonging to a deleted part are dropped
+from the request rather than sent to land on nothing. A save that would remove
+every part fails instead of writing an empty model.
+
 ### Two kinds of export
 
 | | What you get |
@@ -312,9 +342,31 @@ set of parts and rotating them is meant to do.
 
 Marking a part also opens an editor under the list, for changing those parts
 rather than the whole model: **move** it along each axis, **rotate** it, **scale**
-it per axis, and give it a **material** and a colour. The viewer shows every
-change as it is made, and pressing **Save as** writes them into the file along
-with the names.
+it per axis, and restyle it. The viewer shows every change as it is made, and
+pressing **Save as** writes them into the file along with the names. The same
+editor sits in a part's own dialog, so one component can be worked on without
+hunting for it in the list.
+
+Restyling is a **material** preset with a **colour**, and three sliders:
+
+| | |
+|---|---|
+| **Opaque** | How solid the part is, down to 5%. |
+| **Rough** | How diffuse its finish is. |
+| **Metal** | How metallic it is. |
+
+Opacity is the one that needs no preset. Turning a housing see-through in order
+to look at what is inside it should not throw away the housing's own finish, so
+with the type left on *Keep original* the part keeps every material it was
+authored with — textures included — and only fades. Rough and metal are the
+opposite: they override the preset, and mean nothing without one. There is no
+telling what the file shaded a part with, so there is no value they could hold
+that would mean "leave it alone" — they are disabled until a preset is picked,
+and seeded from it the moment one is.
+
+A faded part stops writing depth in the viewer, so what is behind it shows
+through rather than being clipped by draw order, and it is exported with glTF's
+`alphaMode: BLEND`.
 
 Everything in that panel can also be done by hand in the viewport. With a part
 selected, **Move**, **Rotate** and **Scale** in the top-left corner attach a
@@ -354,6 +406,15 @@ is buried the moment it is anchored on the part it edits.
   settings, and the colour you pick is converted from sRGB so the exported file
   is the shade you chose. Leave the type on *Keep original* to move a part
   without touching how it looks.
+- **Fading a part copies what it was shaded with rather than replacing it.**
+  Blender shares materials and mesh data between objects freely, so both are
+  forked before the alpha is touched — otherwise fading one part would fade
+  every part instanced from the same mesh. A part with no material of its own
+  is given a plain one to fade, since there is nothing else to make see-through.
+- **The panels over the viewer live inside it.** Filling the window turns the
+  viewer into a fixed overlay across the whole page; anything left outside it
+  would be buried underneath, which is why the part's details and its preview
+  are children of the viewer rather than siblings.
 - **STL and PLY keep neither names nor materials**, but the moves, rotations and
   scales still apply, because those are baked into the geometry that is written.
   OBJ needs every part to carry a material once any part is styled, so unstyled
@@ -371,7 +432,11 @@ is buried the moment it is anchored on the part it edits.
   other value the parts did not happen to share.
 - **An edit that names no part in the model is reported**, not passed over. If a
   save comes back with a warning naming parts, those names no longer match the
-  objects the converter found, and nothing was applied to them.
+  objects the converter found, and nothing was applied to them. A deletion that
+  names no part is reported the same way.
+- **A deleted part is numbered afresh in the document.** `parts.json` describes
+  the model it is written beside, so the indices skip nothing — they run over the
+  parts that were actually exported.
 
 Edits are cleared when a different model is analysed. **Reset** in the editor
 returns the marked parts to how they arrived. Above the list, **Reset names**
@@ -612,9 +677,13 @@ curl -F file=@part.stp -F target=.usdz \
 Conversion options: `scale`, `center` (`none`/`origin`/`floor`), `decimate`,
 `triangulate`, `apply_modifiers`, `animations`, `draco` (GLB), `y_up`
 (USD/USDZ), `cad_tolerance` (STEP/IGES), `archive_entry` to pick a specific
-model inside an archive, `renames` — a `{"old": "new"}` map of part names — and
+model inside an archive, `renames` — a `{"old": "new"}` map of part names —
 `edits`, a map of part name to `{"move": [x, y, z], "rotate": [x, y, z], "scale":
-[x, y, z], "material": "metal", "color": "#ff2200"}`. `bundle` with
+[x, y, z], "material": "metal", "color": "#ff2200", "opacity": 0.5,
+"roughness": 0.8, "metalness": 0.2}`, and `remove`, a list of part names to drop
+from the scene before anything else touches it. `opacity` applies with or
+without a material; `roughness` and `metalness` default to the chosen preset's
+own values when left out. `bundle` with
 `part_details` writes `parts.json` beside the model and zips the two together. Both are applied between
 import and export. Every edit field is a delta on the part's own local transform
 in the viewer's glTF-style Y-up axes, not Blender's Z-up; rotations are in
@@ -654,6 +723,8 @@ frontend/src/
   App.tsx          shell: health/capabilities and the two tabs
   useConversion.ts upload + job polling, shared by both tabs
   views/           ConvertView (format → options → result), AnalysisView
-  components/      Dropzone, OptionsPanel, ModelViewer (three.js + explode)
+  usePartShot.ts   one part rendered alone, for the preview and the dialog
+  components/      Dropzone, OptionsPanel, ModelViewer (three.js + explode),
+                   PartEditor, PartPreview, PartDialog (one part, full size)
 docs/FORMATS.md    what each engine actually provides, and why
 ```

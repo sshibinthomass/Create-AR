@@ -37,6 +37,7 @@ app.add_middleware(
 CHUNK = 1024 * 1024
 MAX_RENAMES = 500
 MAX_EDITS = 500
+MAX_REMOVALS = 500
 MAX_NAME_LEN = 120
 _SAFE_STEM = re.compile(r"[^A-Za-z0-9._-]+")
 
@@ -78,6 +79,14 @@ class PartEdit(BaseModel):
     # "" keeps whatever material the part was authored with.
     material: str = Field("", pattern=_MATERIAL_PATTERN)
     color: str = Field("#cccccc", pattern="^#[0-9a-fA-F]{6}$")
+    # How solid the part is; 1 leaves it as the file has it. The one styling
+    # that works without a preset -- the part keeps its own materials and only
+    # fades, so what you see through it is still its own finish.
+    opacity: float = Field(1.0, gt=0.0, le=1.0)
+    # Where the chosen preset is nudged to. None takes the preset's own value,
+    # which is what a caller sending only a material means.
+    roughness: float | None = Field(None, ge=0.0, le=1.0)
+    metalness: float | None = Field(None, ge=0.0, le=1.0)
 
     @field_validator("move")
     @classmethod
@@ -100,6 +109,7 @@ class PartEdit(BaseModel):
     def is_noop(self) -> bool:
         return (
             not self.material
+            and self.opacity >= 1.0
             and not any(self.move)
             and not any(self.rotate)
             and all(a == 1.0 for a in self.scale)
@@ -127,6 +137,8 @@ class Options(BaseModel):
     renames: dict[str, str] = Field(default_factory=dict)
     # Object name -> the tweaks to apply to it, likewise before export.
     edits: dict[str, PartEdit] = Field(default_factory=dict)
+    # Objects to drop from the scene entirely, before anything is edited.
+    remove: list[str] = Field(default_factory=list)
     # Write parts.json beside the model and zip the two together. What goes in
     # it comes from the browser, which is where the parts were named.
     bundle: bool = False
@@ -153,6 +165,19 @@ class Options(BaseModel):
             if name and name != old:
                 cleaned[str(old)[:MAX_NAME_LEN]] = name
         return cleaned
+
+    @field_validator("remove")
+    @classmethod
+    def _clean_removals(cls, value: list[str]) -> list[str]:
+        if len(value) > MAX_REMOVALS:
+            raise ValueError(f"at most {MAX_REMOVALS} removed parts per job")
+        # Deduplicated but kept in order, so the log reads the way the list did.
+        seen: dict[str, None] = {}
+        for name in value:
+            name = str(name)[:MAX_NAME_LEN]
+            if name:
+                seen.setdefault(name, None)
+        return list(seen)
 
     @field_validator("edits")
     @classmethod

@@ -5,6 +5,14 @@ const AXES = ['X', 'Y', 'Z'] as const
 interface Props {
   /** Every part the change applies to, by the name shown in the list. */
   names: string[]
+  /**
+   * Distinguishes this panel's control ids from another's.
+   *
+   * Two editors can be on the page at once -- the one under the parts list and
+   * the one in a part's own dialog -- and a duplicated id would point both
+   * labels at whichever control the document happens to hold first.
+   */
+  scope?: string
   value: PartEdit
   /** The model's largest dimension, which sets how far a part can be nudged. */
   extent: number
@@ -19,7 +27,7 @@ interface Props {
  * nudging a part until it looks right in the viewer beside you, not entering a
  * figure you already know.
  */
-function Slider({ id, label, value, min, max, step, format, onChange }: {
+function Slider({ id, label, value, min, max, step, format, onChange, disabled }: {
   id: string
   label: string
   value: number
@@ -28,12 +36,14 @@ function Slider({ id, label, value, min, max, step, format, onChange }: {
   step: number
   format: (v: number) => string
   onChange: (v: number) => void
+  disabled?: boolean
 }) {
   return (
-    <div className="edit-row">
+    <div className={`edit-row${disabled ? ' off' : ''}`}>
       <label htmlFor={id}>{label}</label>
       <input
         id={id} type="range" min={min} max={max} step={step} value={value}
+        disabled={disabled}
         onChange={(e) => onChange(Number(e.target.value))}
       />
       <span className="edit-v">{format(value)}</span>
@@ -42,9 +52,25 @@ function Slider({ id, label, value, min, max, step, format, onChange }: {
 }
 
 /** Move, rotate, scale and restyle whichever parts are currently marked. */
-export default function PartEditor({ names, value, extent, onChange, onReset }: Props) {
+export default function PartEditor({
+  names, scope = 'edit', value, extent, onChange, onReset,
+}: Props) {
   const set = <K extends keyof PartEdit>(key: K, v: PartEdit[K]) =>
     onChange({ ...value, [key]: v })
+
+  /**
+   * Choose a preset, and start its finish sliders where the preset puts them.
+   *
+   * They are overrides on the preset, so they have to begin at what they are
+   * overriding -- otherwise picking "metal" would silently drag the roughness
+   * off to whatever the last preset happened to leave behind.
+   */
+  const setMaterial = (kind: MaterialType) => {
+    const preset = MATERIALS[kind as keyof typeof MATERIALS]
+    onChange(preset
+      ? { ...value, material: kind, roughness: preset.roughness, metalness: preset.metalness }
+      : { ...value, material: kind })
+  }
 
   const setAxis = (key: 'move' | 'rotate' | 'scale', i: number, v: number) => {
     const next = [...value[key]] as [number, number, number]
@@ -82,7 +108,7 @@ export default function PartEditor({ names, value, extent, onChange, onReset }: 
       <div className="edit-group">Move</div>
       {AXES.map((axis, i) => (
         <Slider
-          key={`m${axis}`} id={`edit-move-${axis}`} label={axis} value={value.move[i]}
+          key={`m${axis}`} id={`${scope}-move-${axis}`} label={axis} value={value.move[i]}
           min={-reach} max={reach} step={reach / 200}
           format={(v) => v.toFixed(decimals)}
           onChange={(v) => setAxis('move', i, v)}
@@ -92,7 +118,7 @@ export default function PartEditor({ names, value, extent, onChange, onReset }: 
       <div className="edit-group">Rotate</div>
       {AXES.map((axis, i) => (
         <Slider
-          key={`r${axis}`} id={`edit-rot-${axis}`} label={axis} value={value.rotate[i]}
+          key={`r${axis}`} id={`${scope}-rot-${axis}`} label={axis} value={value.rotate[i]}
           min={-180} max={180} step={1}
           format={(v) => `${v}°`}
           onChange={(v) => setAxis('rotate', i, v)}
@@ -102,7 +128,7 @@ export default function PartEditor({ names, value, extent, onChange, onReset }: 
       <div className="edit-group">Scale</div>
       {AXES.map((axis, i) => (
         <Slider
-          key={`s${axis}`} id={`edit-scale-${axis}`} label={axis} value={value.scale[i]}
+          key={`s${axis}`} id={`${scope}-scale-${axis}`} label={axis} value={value.scale[i]}
           min={0.05} max={4} step={0.01}
           format={(v) => `${v.toFixed(2)}×`}
           onChange={(v) => setAxis('scale', i, v)}
@@ -111,10 +137,10 @@ export default function PartEditor({ names, value, extent, onChange, onReset }: 
 
       <div className="edit-group">Material</div>
       <div className="edit-row">
-        <label htmlFor="edit-material">Type</label>
+        <label htmlFor={`${scope}-material`}>Type</label>
         <select
-          id="edit-material" value={value.material}
-          onChange={(e) => set('material', e.target.value as MaterialType)}
+          id={`${scope}-material`} value={value.material}
+          onChange={(e) => setMaterial(e.target.value as MaterialType)}
         >
           <option value="">Keep original</option>
           {Object.entries(MATERIALS).map(([key, m]) => (
@@ -128,13 +154,36 @@ export default function PartEditor({ names, value, extent, onChange, onReset }: 
         />
       </div>
 
-      {value.material && (
-        <div className="note">
-          A new material replaces everything the part was shaded with, its
-          textures included. Leave this on “Keep original” to move the part
-          without touching how it looks.
-        </div>
-      )}
+      {/* Opacity needs no preset: fading a housing to see inside it is worth
+          doing without throwing away the finish you are looking through. */}
+      <Slider
+        id={`${scope}-opacity`} label="Opaque" value={value.opacity}
+        min={0.05} max={1} step={0.01}
+        format={(v) => `${Math.round(v * 100)}%`}
+        onChange={(v) => set('opacity', v)}
+      />
+      <Slider
+        id={`${scope}-rough`} label="Rough" value={value.roughness}
+        min={0} max={1} step={0.01} disabled={!value.material}
+        format={(v) => v.toFixed(2)}
+        onChange={(v) => set('roughness', v)}
+      />
+      <Slider
+        id={`${scope}-metal`} label="Metal" value={value.metalness}
+        min={0} max={1} step={0.01} disabled={!value.material}
+        format={(v) => v.toFixed(2)}
+        onChange={(v) => set('metalness', v)}
+      />
+
+      <div className="note">
+        {value.material
+          ? `A new material replaces everything the part was shaded with, its
+             textures included. Rough and metal start where the preset puts them
+             and are yours to nudge.`
+          : `Opacity works on the part as it is. Rough and metal need a material
+             to apply to — there is no telling what the file shaded this part
+             with, so there is no value that would mean “leave it alone”.`}
+      </div>
     </div>
   )
 }

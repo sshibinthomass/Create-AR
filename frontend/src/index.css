@@ -417,6 +417,30 @@ input[type='range'] { width: 110px; accent-color: var(--accent); }
 }
 .part-undo:hover { color: var(--accent); background: var(--panel-2); }
 
+.part-open, .part-drop {
+  flex: none; background: none; border: none; color: var(--dim);
+  padding: 2px 5px; border-radius: 6px; font-size: 13px; line-height: 1;
+  opacity: 0; transition: opacity .1s;
+}
+/* Kept out of the way until the row is under the pointer: a delete button on
+   every one of three hundred rows reads as a list of delete buttons. Focus
+   brings them back, so the keyboard is not left without them. */
+.part-row:hover .part-open, .part-row:hover .part-drop,
+.part-open:focus-visible, .part-drop:focus-visible { opacity: 1; }
+.part-open:hover { color: var(--accent); background: var(--panel-2); }
+.part-drop:hover { color: var(--err); background: var(--panel-2); }
+
+.part-row.gone { cursor: default; }
+.part-row.gone:hover { background: none; }
+.part-row.gone .part-n, .part-row.gone input {
+  opacity: .45; text-decoration: line-through;
+}
+.part-restore {
+  flex: none; background: none; border: 1px solid var(--line);
+  color: var(--muted); border-radius: 7px; padding: 3px 9px; font-size: 11px;
+}
+.part-restore:hover { color: var(--accent); border-color: var(--accent); }
+
 .head-note { margin-left: auto; font-size: 11px; color: var(--accent); }
 .head-note + .head-reset { margin-left: 0; }
 .head-reset {
@@ -476,6 +500,10 @@ input[type='range'] { width: 110px; accent-color: var(--accent); }
 .edit-group:first-of-type { margin-top: 0; }
 
 .edit-row { display: flex; align-items: center; gap: 10px; padding: 2px 0; }
+/* A slider that needs a material to act on: shown, so the option is findable,
+   but plainly not in play until one is picked. */
+.edit-row.off { opacity: .4; }
+.edit-row.off input[type='range'] { cursor: not-allowed; }
 .edit-row label { flex: none; width: 34px; color: var(--muted); font-size: 12px; }
 .edit-row input[type='range'] { flex: 1; width: auto; min-width: 0; }
 .edit-row select { flex: 1; width: auto; min-width: 0; }
@@ -671,6 +699,11 @@ button.field-side:hover { color: var(--err); }
   font-size: 17px; line-height: 1; padding: 0 2px;
 }
 .part-card-x:hover { color: var(--text); }
+.part-card-open {
+  flex: none; background: none; border: none; color: var(--dim);
+  font-size: 14px; line-height: 1; padding: 2px;
+}
+.part-card-open:hover { color: var(--accent); }
 .part-card-empty { margin: 0; padding: 11px 12px; font-size: 12px; color: var(--dim); }
 
 .part-facts { margin: 0; padding: 10px 12px; overflow-y: auto; }
@@ -693,14 +726,155 @@ button.field-side:hover { color: var(--err); }
   overflow: hidden;
 }
 .part-shot-frame {
-  position: relative; aspect-ratio: 1;
+  position: relative; aspect-ratio: 1; width: 100%;
   display: grid; place-items: center;
+  padding: 0; border: none;
   background: #5a6172;   /* the backdrop the render is shot against */
 }
 .part-shot-frame img { display: block; width: 100%; height: 100%; }
 .part-shot-wait { font-size: 11px; color: rgba(255, 255, 255, .7); }
+/* Only on hover: the thumbnail is small enough that a permanent label over it
+   would cover the part it is advertising. */
+.part-shot-open {
+  position: absolute; inset: auto 0 0 0;
+  padding: 5px; font-size: 10px; letter-spacing: .08em; text-transform: uppercase;
+  background: rgba(11, 13, 18, .82); color: var(--text);
+  opacity: 0; transition: opacity .12s;
+}
+.part-shot-frame:hover .part-shot-open,
+.part-shot-frame:focus-visible .part-shot-open { opacity: 1; }
 .part-shot-cap {
   padding: 6px 9px; font-size: 10px; letter-spacing: .05em;
   text-transform: uppercase; color: var(--dim);
   border-top: 1px solid var(--line-soft);
 }
+
+/* ---------- one component, full size ---------- */
+
+/* Above the full-screen viewer overlay, which is z-index 100: opening a part
+   from a viewer that fills the window has to put the part in front of it. */
+.pd-back {
+  position: fixed; inset: 0; z-index: 200;
+  display: grid; place-items: center; padding: 24px;
+  background: rgba(6, 8, 12, .72);
+  backdrop-filter: blur(3px);
+}
+.pd {
+  display: flex; flex-direction: column;
+  width: min(1080px, 100%); max-height: 100%;
+  border-radius: 14px; border: 1px solid var(--line);
+  background: var(--panel);
+  box-shadow: 0 24px 70px rgba(0, 0, 0, .6);
+  overflow: hidden;
+}
+
+.pd-head {
+  display: flex; align-items: center; gap: 12px;
+  padding: 13px 16px; border-bottom: 1px solid var(--line);
+  background: var(--panel-2);
+}
+.pd-head h2 {
+  margin: 0; min-width: 0; font-size: 15px; font-weight: 650;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.pd-of { flex: none; font-size: 11px; color: var(--dim); }
+.pd-gone {
+  flex: none; padding: 2px 9px; border-radius: 999px;
+  background: rgba(242, 85, 90, .14); color: var(--err); font-size: 11px;
+}
+.pd-x {
+  flex: none; margin-left: auto; background: none; border: none;
+  color: var(--dim); font-size: 22px; line-height: 1; padding: 0 4px;
+}
+.pd-x:hover { color: var(--text); }
+
+/* The render and the fields side by side, and stacked once there is no room
+   for both -- the render is the half worth keeping wide. */
+.pd-body {
+  display: grid; grid-template-columns: minmax(0, 1fr) 380px;
+  min-height: 0; overflow: hidden;
+}
+@media (max-width: 900px) {
+  .pd-body { grid-template-columns: minmax(0, 1fr); overflow-y: auto; }
+}
+
+.pd-stage {
+  display: flex; flex-direction: column; min-width: 0;
+  border-right: 1px solid var(--line);
+}
+.pd-shot {
+  flex: 1; min-height: 260px;
+  display: grid; place-items: center;
+  background: #5a6172;   /* the backdrop the render is shot against */
+}
+.pd-shot img { display: block; width: 100%; height: 100%; object-fit: contain; }
+.pd-cap {
+  flex: none; padding: 8px 12px; font-size: 10px;
+  letter-spacing: .06em; text-transform: uppercase; color: var(--dim);
+  border-top: 1px solid var(--line-soft);
+}
+
+.pd-side { min-width: 0; overflow-y: auto; }
+
+.pd-block { padding: 14px 16px; }
+.pd-block-head {
+  display: flex; align-items: center; gap: 8px; margin-bottom: 11px;
+  font-size: 11px; text-transform: uppercase; letter-spacing: .06em;
+  color: var(--dim);
+}
+.pd-dirty {
+  padding: 1px 8px; border-radius: 999px; letter-spacing: 0; text-transform: none;
+  background: rgba(240, 180, 41, .14); color: var(--warn); font-size: 11px;
+}
+
+.pd-field { display: block; }
+.pd-field > span {
+  display: block; margin-bottom: 5px; font-size: 12px; color: var(--muted);
+}
+.pd-field input, .pd-row input, .pd-row textarea {
+  width: 100%; background: var(--panel-2);
+  border: 1px solid var(--line); color: var(--text);
+  border-radius: 7px; padding: 6px 9px; font: inherit; font-size: 13px;
+}
+.pd-row textarea { resize: vertical; line-height: 1.5; }
+.pd-field input:focus, .pd-row input:focus, .pd-row textarea:focus {
+  outline: none; border-color: var(--accent);
+}
+
+.pd-rows { margin-top: 14px; }
+/* The label and the button on one line, the text under both. */
+.pd-row { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 12px; }
+.pd-row .pd-label { flex: 1 1 auto; width: auto; min-width: 0; font-size: 12px; }
+.pd-row textarea { flex: 1 1 100%; }
+.pd-row-x {
+  flex: none; background: none; border: none; color: var(--dim);
+  padding: 4px 7px; border-radius: 6px; font-size: 15px; line-height: 1;
+}
+.pd-row-x:hover { color: var(--err); background: var(--panel-2); }
+.pd-empty { margin: 0; font-size: 12px; color: var(--dim); }
+
+.pd-acts { display: flex; gap: 8px; margin-top: 12px; }
+.pd-add {
+  background: none; border: 1px solid var(--line); color: var(--muted);
+  border-radius: 7px; padding: 5px 11px; font-size: 12px;
+}
+.pd-add:hover:not(:disabled) { color: var(--accent); border-color: var(--accent); }
+.pd-add:disabled { opacity: .45; }
+
+.pd-save { display: flex; align-items: center; gap: 8px; margin-top: 14px; }
+.pd-save .go { margin: 0; }
+.pd-save .head-reset:disabled { opacity: .4; }
+
+.pd-danger {
+  display: flex; align-items: center; gap: 12px;
+  padding: 14px 16px; border-top: 1px solid var(--line);
+  font-size: 12px; color: var(--dim); line-height: 1.5;
+}
+.pd-delete, .pd-restore {
+  flex: none; background: none; border-radius: 7px;
+  padding: 6px 12px; font-size: 12px;
+}
+.pd-delete { border: 1px solid rgba(242, 85, 90, .45); color: var(--err); }
+.pd-delete:hover { background: rgba(242, 85, 90, .12); }
+.pd-restore { border: 1px solid var(--line); color: var(--muted); }
+.pd-restore:hover { color: var(--accent); border-color: var(--accent); }

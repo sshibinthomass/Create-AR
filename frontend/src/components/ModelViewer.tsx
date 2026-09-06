@@ -10,8 +10,8 @@ import {
   Box3, Box3Helper, Color, Euler, Matrix3, Matrix4, Object3D, Quaternion, Vector3,
   type Group, type LineBasicMaterial, type Material, type Mesh,
 } from 'three'
-import { NO_EDIT, type GizmoMode, type PartEdit } from '../api'
-import { buildMaterial, poseEdited } from '../partEdit'
+import { isRestyled, NO_EDIT, type GizmoMode, type PartEdit } from '../api'
+import { poseEdited, restyleNode } from '../partEdit'
 import { fileNames, partNodes, type NameSource } from '../partGraph'
 
 /**
@@ -352,13 +352,15 @@ function SelectionBox({ part, separation, edit, wrapper }: {
  * other way round. Real dimensions are reported in the stats panel.
  */
 function Model({
-  url, separation, showAllLabels, labels, edits, gizmo, selected, onSelect, onEdit, onParts,
+  url, separation, showAllLabels, labels, edits, hidden, gizmo, selected, onSelect,
+  onEdit, onParts,
 }: {
   url: string
   separation: number
   showAllLabels: boolean
   labels: Record<string, string>
   edits: Record<string, PartEdit>
+  hidden: readonly string[]
   gizmo: GizmoMode
   selected: readonly string[]
   onSelect: (name: string | null, additive: boolean) => void
@@ -404,38 +406,45 @@ function Model({
   // this model goes away.
   useEffect(() => () => { for (const p of parts) poseNode(p, NO_EDIT, 0) }, [parts])
 
-  // Only a part's material and colour reach the GPU, and building a
-  // MeshPhysicalMaterial compiles a shader. Keying the effect below on the whole
-  // edit would recompile one on every frame of a move or rotate drag, so it is
-  // keyed on the styling alone -- which is why `edits` is read but not listed.
+  // A deleted part is taken out of the picture rather than out of the graph:
+  // deleting is undoable here, and the parts list, the indices the previews are
+  // keyed on and the names the edits are stored under all have to keep lining
+  // up with the file until the model is actually saved.
+  useEffect(() => {
+    const dropped = new Set(hidden)
+    for (const p of parts) p.node.visible = !dropped.has(p.name)
+    return () => { for (const p of parts) p.node.visible = true }
+  }, [parts, hidden])
+
+  // Only a part's shading reaches the GPU, and building a MeshPhysicalMaterial
+  // compiles a shader. Keying the effect below on the whole edit would recompile
+  // one on every frame of a move or rotate drag, so it is keyed on the styling
+  // alone -- which is why `edits` is read but not listed.
   const styling = JSON.stringify(
     parts.map((p) => {
       const edit = edits[p.name]
-      return edit?.material ? [p.name, edit.material, edit.color] : 0
+      return edit && isRestyled(edit)
+        ? [p.name, edit.material, edit.color, edit.opacity, edit.roughness, edit.metalness]
+        : 0
     }),
   )
 
-  // Restyling replaces the part's materials outright, so the originals are put
-  // back when the edit goes away -- the glTF's own materials are shared with
+  // Restyling stands materials in front of the part's own, so the originals are
+  // put back when the edit goes away -- the glTF's own materials are shared with
   // whatever else the cache is handing this scene to.
   useEffect(() => {
-    const original = new Map<Mesh, Material | Material[]>()
-    const made: Material[] = []
+    const restored = new Map<Mesh, Material | Material[]>()
+    const built: Material[] = []
     for (const p of parts) {
       const edit = edits[p.name]
-      if (!edit?.material) continue
-      const material = buildMaterial(edit)
-      made.push(material)
-      p.node.traverse((n) => {
-        const mesh = n as Mesh
-        if (!mesh.isMesh) return
-        original.set(mesh, mesh.material)
-        mesh.material = material
-      })
+      if (!edit || !isRestyled(edit)) continue
+      const { original, made } = restyleNode(p.node, edit)
+      for (const [mesh, material] of original) restored.set(mesh, material)
+      built.push(...made)
     }
     return () => {
-      for (const [mesh, material] of original) mesh.material = material
-      for (const material of made) material.dispose()
+      for (const [mesh, material] of restored) mesh.material = material
+      for (const material of built) material.dispose()
     }
   }, [parts, styling])
 
@@ -445,7 +454,8 @@ function Model({
 
   const marks = useMemo(() => new Set(selected), [selected])
   const picked = useMemo(() => parts.filter((p) => marks.has(p.name)), [parts, marks])
-  const labelled = showAllLabels ? parts : picked
+  const gone = useMemo(() => new Set(hidden), [hidden])
+  const labelled = (showAllLabels ? parts : picked).filter((p) => !gone.has(p.name))
 
   // The gizmo does not grab the part itself. A part's own origin is where the
   // exporter put it, and plenty of models leave every one of them on the world
@@ -613,6 +623,8 @@ interface Props {
   labels?: Record<string, string>
   /** Moves, rotations, scales and materials to preview, keyed the same way. */
   edits?: Record<string, PartEdit>
+  /** Parts marked for deletion: taken out of the picture, left in the graph. */
+  hidden?: readonly string[]
   /** Fired when a gizmo drag changes the marked parts. Enables the gizmo. */
   onEdit?: (changes: Record<string, PartEdit>) => void
   /** The picked part, by its original name: labelled and outlined. */
@@ -630,6 +642,14 @@ interface Props {
   onParts?: (names: string[], reach: number) => void
   /** False parks the render loop, for a viewer sitting on a hidden tab. */
   active?: boolean
+  /**
+   * Chrome to draw over the model -- panels about whatever is selected.
+   *
+   * Rendered inside the viewer rather than beside it so that filling the
+   * window carries them along: the viewer becomes a fixed overlay over the
+   * whole page, and anything left outside it is buried underneath.
+   */
+  children?: ReactNode
 }
 
 const RESTING_PCT = 40
@@ -650,6 +670,7 @@ const STAGES: { upTo: number; label: string }[] = [
 const NO_LABELS: Record<string, string> = {}
 const NO_EDITS: Record<string, PartEdit> = {}
 const NO_SELECTION: readonly string[] = []
+const NO_HIDDEN: readonly string[] = []
 
 interface OrbitHandle {
   target: Vector3
@@ -720,7 +741,8 @@ const GIZMOS: { mode: Exclude<GizmoMode, null>; label: string; icon: JSX.Element
 
 export default function ModelViewer({
   url, placeholder, explodeOpen = false, labels = NO_LABELS, edits = NO_EDITS,
-  selected = NO_SELECTION, onSelect, onEdit, onParts, active = true,
+  hidden = NO_HIDDEN, selected = NO_SELECTION, onSelect, onEdit, onParts,
+  active = true, children,
 }: Props) {
   const [open, setOpen] = useState(explodeOpen)
   const [pct, setPct] = useState(explodeOpen ? RESTING_PCT : 0)
@@ -837,6 +859,7 @@ export default function ModelViewer({
               showAllLabels={allNames}
               labels={labels}
               edits={edits}
+              hidden={hidden}
               gizmo={gizmo}
               selected={selected}
               onSelect={(name, additive) => onSelect?.(name, additive)}
@@ -870,6 +893,8 @@ export default function ModelViewer({
           />
         </Canvas>
       </ViewerBoundary>
+
+      {children}
 
       <div className="viewer-tools">
         <button className="viewer-tool" title="Put the camera back where it started" onClick={resetView}>

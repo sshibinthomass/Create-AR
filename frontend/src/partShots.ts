@@ -21,8 +21,8 @@ import {
 } from 'three'
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js'
 import { RoomEnvironment } from 'three/examples/jsm/environments/RoomEnvironment.js'
-import type { PartEdit } from './api'
-import { buildMaterial, poseEdited } from './partEdit'
+import { isRestyled, type PartEdit } from './api'
+import { poseEdited, restyleNode } from './partEdit'
 import { fileNames, partNodes, type NameSource } from './partGraph'
 
 export interface PartShot {
@@ -35,6 +35,7 @@ export interface PartShot {
   context: string
 }
 
+/** What a shot is rendered at unless the caller wants a bigger one. */
 const SIZE = 512
 const QUALITY = 0.82
 /** Mid-slate: light parts and dark parts both stand off it. */
@@ -92,19 +93,19 @@ export interface PartStudio {
   close(): void
 }
 
-export async function openStudio(url: string): Promise<PartStudio | null> {
+export async function openStudio(url: string, size = SIZE): Promise<PartStudio | null> {
   const gltf = await new GLTFLoader().loadAsync(url)
   const nodes = partNodes(gltf.scene)
   if (!nodes.length) return null
   const named = fileNames(gltf.parser as NameSource)
 
   const canvas = document.createElement('canvas')
-  canvas.width = SIZE
-  canvas.height = SIZE
+  canvas.width = size
+  canvas.height = size
   // preserveDrawingBuffer, because the pixels are read back after the render
   // rather than during it.
   const renderer = new WebGLRenderer({ canvas, antialias: true, preserveDrawingBuffer: true })
-  renderer.setSize(SIZE, SIZE, false)
+  renderer.setSize(size, size, false)
   renderer.toneMapping = ACESFilmicToneMapping
 
   const pmrem = new PMREMGenerator(renderer)
@@ -174,20 +175,14 @@ export async function openStudio(url: string): Promise<PartStudio | null> {
 
       const node = nodes[index]
       const at = rest[index]
-      let made: Material | null = null
-      const swapped = new Map<Mesh, Material | Material[]>()
+      let made: Material[] = []
+      let swapped = new Map<Mesh, Material | Material[]>()
 
       if (edit) {
         poseEdited(node, at.position, at.quaternion, at.scale, edit)
         node.updateMatrixWorld(true)
-        if (edit.material) {
-          made = buildMaterial(edit)
-          node.traverse((child) => {
-            const mesh = child as Mesh
-            if (!mesh.isMesh) return
-            swapped.set(mesh, mesh.material)
-            mesh.material = made!
-          })
+        if (isRestyled(edit)) {
+          ({ original: swapped, made } = restyleNode(node, edit))
         }
       }
 
@@ -202,7 +197,7 @@ export async function openStudio(url: string): Promise<PartStudio | null> {
         node.scale.copy(at.scale)
         node.updateMatrixWorld(true)
         for (const [mesh, material] of swapped) mesh.material = material
-        made?.dispose()
+        for (const material of made) material.dispose()
       }
       return shot
     },
