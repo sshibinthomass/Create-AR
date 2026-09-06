@@ -806,13 +806,30 @@ button.field-side:hover { color: var(--err); }
   flex: 1; min-height: 260px;
   display: grid; place-items: center;
   background: #5a6172;   /* the backdrop the render is shot against */
+  cursor: grab; touch-action: none;   /* the drag turns the camera, not the page */
+  overflow: hidden;
 }
-.pd-shot img { display: block; width: 100%; height: 100%; object-fit: contain; }
+.pd-shot:active { cursor: grabbing; }
+.pd-shot:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+/* The studio's own canvas, put straight into the page. Its drawing buffer is
+   square, so it is fitted rather than stretched. */
+.pd-shot canvas {
+  display: block; max-width: 100%; max-height: 100%;
+  width: auto; height: auto; aspect-ratio: 1;
+}
 .pd-cap {
-  flex: none; padding: 8px 12px; font-size: 10px;
+  flex: none; display: flex; align-items: center; gap: 10px;
+  padding: 7px 12px; font-size: 10px;
   letter-spacing: .06em; text-transform: uppercase; color: var(--dim);
   border-top: 1px solid var(--line-soft);
 }
+.pd-cap-hint { margin-left: auto; letter-spacing: .04em; opacity: .75; }
+.pd-recentre {
+  flex: none; background: none; border: 1px solid var(--line);
+  color: var(--muted); border-radius: 7px; padding: 3px 9px;
+  font-size: 10px; letter-spacing: .06em; text-transform: uppercase;
+}
+.pd-recentre:hover { color: var(--accent); border-color: var(--accent); }
 
 .pd-side { min-width: 0; overflow-y: auto; }
 

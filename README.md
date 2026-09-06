@@ -296,6 +296,13 @@ Clicking that preview — or the ⤢ on the part's row, or on its details
 card — opens the part on its own, full size, which is where a single component
 is worked on rather than a whole assembly:
 
+- **A view you can turn.** Drag to orbit the part, scroll to zoom, arrow keys
+  if you would rather not drag, and **Recentre** to go back to where it
+  started. This moves *the camera*, not the part — turning the part itself is
+  what the rotate sliders do, and that is an edit that gets saved. The angle is
+  kept while you work on the same component, so nudging a slider does not snap
+  the view back to the front; picking a different part starts square-on again.
+
 - **Its name and its description, as fields.** The description is a list of
   label/text pairs, added and dropped one at a time, because that is the shape
   the document stores and the shape the model answers in. Both are a draft until
@@ -307,8 +314,8 @@ is worked on rather than a whole assembly:
   name and description are edited and saved like any typed ones. Correcting one
   part costs one request, not another run over the assembly.
 - **The same move, rotate, scale and restyling sliders** as the panel under the
-  list — including opacity — applied live, with the render beside them
-  redrawing as you drag.
+  list — including opacity — applied live, with the view beside them redrawing
+  as you drag.
 - **Delete part**, which leaves the component out of the model you save.
 
 Deleting is a mark, not a cut. The part is hidden in the viewer, struck through
@@ -455,6 +462,12 @@ is buried the moment it is anchored on the part it edits.
   viewer into a fixed overlay across the whole page; anything left outside it
   would be buried underneath, which is why the part's details and its preview
   are children of the viewer rather than siblings.
+- **The thumbnail is a still; the dialog is not.** A thumbnail that grabbed
+  your drag would be worse than one that does not, and encoding a JPEG per
+  frame is no way to run an orbit — so the dialog puts the offscreen renderer's
+  own canvas straight into the page and drives its camera, while the thumbnail
+  goes on asking it for pictures. Both share one studio type, so what you turn
+  is composed by the same code as what you export.
 - **STL and PLY keep neither names nor materials**, but the moves, rotations and
   scales still apply, because those are baked into the geometry that is written.
   OBJ needs every part to carry a material once any part is styled, so unstyled

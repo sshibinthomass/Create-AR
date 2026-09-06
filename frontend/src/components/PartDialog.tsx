@@ -1,7 +1,9 @@
-import { useEffect, useState } from 'react'
-import { NO_EDIT, type NamerSettings, type PartDetails, type PartEdit } from '../api'
+import { useEffect, useRef, useState } from 'react'
+import {
+  isEdited, NO_EDIT, type NamerSettings, type PartDetails, type PartEdit,
+} from '../api'
+import type { PartStudio } from '../partShots'
 import { nameOnePart } from '../useNamer'
-import { usePartShot } from '../usePartShot'
 import PartEditor from './PartEditor'
 
 /**
@@ -260,26 +262,168 @@ export default function PartDialog({
   )
 }
 
-/** The part itself, rendered large. Its own component so a redraw stays local. */
+/**
+ * The part itself, large and turnable.
+ *
+ * The thumbnail beside the viewer is a still, which is all a thumbnail needs.
+ * Here the studio's own canvas goes straight into the page instead, so dragging
+ * turns the camera at the frame rate rather than encoding a JPEG per step --
+ * and the camera is the only thing that moves. Turning the *part* is what the
+ * rotate sliders below do, and that is an edit; this is just where you stand.
+ */
 function Stage({ url, index, name, edit }: {
   url: string
   index: number
   name: string
   edit: PartEdit | undefined
 }) {
-  const { data, failed, touched } = usePartShot(url, index, edit, SHOT_SIZE)
+  const host = useRef<HTMLDivElement>(null)
+  const studio = useRef<PartStudio | null>(null)
+  const [ready, setReady] = useState(false)
+  const [failed, setFailed] = useState(false)
+  const [turned, setTurned] = useState(false)
+
+  // One studio per model. It holds a WebGL context and a copy of the model on
+  // the GPU, so it is closed rather than left to a GC, and its canvas is taken
+  // back out of the page -- React did not put it there and will not remove it.
+  useEffect(() => {
+    let live = true
+    setReady(false)
+    setFailed(false)
+    const opening = import('../partShots').then((m) => m.openStudio(url, SHOT_SIZE))
+    opening.then((it) => {
+      if (!live || !it) {
+        it?.close()
+        if (live) setFailed(true)
+        return
+      }
+      studio.current = it
+      host.current?.appendChild(it.canvas)
+      setReady(true)
+    }).catch(() => { if (live) setFailed(true) })
+
+    return () => {
+      live = false
+      studio.current = null
+      opening.then((it) => { it?.canvas.remove(); it?.close() }).catch(() => {})
+    }
+  }, [url])
+
+  // `edit` is a fresh object on every render of the parent, so the effect is
+  // keyed on its signature instead -- otherwise every keystroke in the name
+  // field would re-stage the part and throw away the angle you had turned to.
+  const touched = edit != null && isEdited(edit)
+  const pose = touched ? JSON.stringify(edit) : ''
+  const was = useRef(-1)
+
+  useEffect(() => {
+    if (!ready) return
+    const it = studio.current
+    // A part the viewer knows about that this parse does not is a mismatch
+    // worth showing as a failure rather than a blank box.
+    if (!it || index >= it.names.length) {
+      setFailed(true)
+      return
+    }
+    it.show(index, touched ? edit : undefined)
+    // The studio keeps the angle across an edit to the same part, so the way
+    // back to the resting view has to stay offered; a different part starts
+    // square-on again and has nothing to go back to.
+    if (was.current !== index) {
+      was.current = index
+      setTurned(false)
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [ready, index, pose])
+
+  // Zooming must not scroll the page behind the dialog, and React registers
+  // onWheel passively -- so preventDefault needs a listener of our own.
+  useEffect(() => {
+    const box = host.current
+    if (!box) return
+    const onWheel = (e: WheelEvent) => {
+      e.preventDefault()
+      studio.current?.zoom(e.deltaY)
+      setTurned(true)
+    }
+    box.addEventListener('wheel', onWheel, { passive: false })
+    return () => box.removeEventListener('wheel', onWheel)
+  }, [])
+
+  // The drag is handled outside React: it redraws the canvas directly, and a
+  // state change per pointermove would re-render the whole dialog for nothing.
+  const drag = useRef<{ x: number; y: number } | null>(null)
+
+  const onDown = (e: React.PointerEvent) => {
+    if (!studio.current) return
+    drag.current = { x: e.clientX, y: e.clientY }
+    e.currentTarget.setPointerCapture(e.pointerId)
+  }
+
+  const onMove = (e: React.PointerEvent) => {
+    const from = drag.current
+    if (!from) return
+    studio.current?.turn(e.clientX - from.x, e.clientY - from.y)
+    drag.current = { x: e.clientX, y: e.clientY }
+    setTurned(true)
+  }
+
+  const onUp = (e: React.PointerEvent) => {
+    drag.current = null
+    if (e.currentTarget.hasPointerCapture(e.pointerId)) {
+      e.currentTarget.releasePointerCapture(e.pointerId)
+    }
+  }
+
+  // Arrows turn and +/- zoom, so the view is not drag-only.
+  const onKey = (e: React.KeyboardEvent) => {
+    const step = e.shiftKey ? 60 : 20
+    const by: Record<string, [number, number]> = {
+      ArrowLeft: [-step, 0], ArrowRight: [step, 0],
+      ArrowUp: [0, -step], ArrowDown: [0, step],
+    }
+    if (by[e.key]) {
+      e.preventDefault()
+      studio.current?.turn(...by[e.key])
+      setTurned(true)
+    } else if (e.key === '+' || e.key === '=' || e.key === '-') {
+      e.preventDefault()
+      studio.current?.zoom(e.key === '-' ? 400 : -400)
+      setTurned(true)
+    }
+  }
 
   return (
     <div className="pd-stage">
-      <div className="pd-shot">
-        {data ? (
-          <img src={`data:image/jpeg;base64,${data}`} alt={`${name}, on its own`} />
-        ) : (
+      <div
+        ref={host}
+        className="pd-shot"
+        // Not role="img": it takes focus and answers the arrow keys, which is
+        // not what a screen reader should be told to expect of a picture.
+        role="group"
+        tabIndex={0}
+        aria-label={`${name}, on its own. Drag or use the arrow keys to turn it.`}
+        onPointerDown={onDown}
+        onPointerMove={onMove}
+        onPointerUp={onUp}
+        onPointerCancel={onUp}
+        onKeyDown={onKey}
+      >
+        {!ready && (
           <span className="part-shot-wait">{failed ? 'No preview' : 'Rendering…'}</span>
         )}
       </div>
       <div className="pd-cap">
-        {touched ? 'This part, with your edits' : 'This part, as the file has it'}
+        <span>{touched ? 'This part, with your edits' : 'This part, as the file has it'}</span>
+        <span className="pd-cap-hint">Drag to turn · scroll to zoom</span>
+        {turned && (
+          <button
+            className="pd-recentre"
+            onClick={() => { studio.current?.recentre(); setTurned(false) }}
+          >
+            Recentre
+          </button>
+        )}
       </div>
     </div>
   )
