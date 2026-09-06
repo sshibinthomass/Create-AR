@@ -8,6 +8,7 @@ import re
 import shutil
 import subprocess
 from pathlib import Path
+from typing import Literal
 
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
@@ -109,6 +110,10 @@ class PartEdit(Pose):
     # "" keeps whatever material the part was authored with.
     material: str = Field("", pattern=_MATERIAL_PATTERN)
     color: str = Field("#cccccc", pattern="^#[0-9a-fA-F]{6}$")
+    # Whether `color` applies with no preset chosen. A preset always paints in
+    # it; without one this is the difference between leaving the part as the
+    # file shades it and leaving it in a different colour.
+    recolor: bool = False
     # How solid the part is; 1 leaves it as the file has it. The one styling
     # that works without a preset -- the part keeps its own materials and only
     # fades, so what you see through it is still its own finish.
@@ -121,6 +126,7 @@ class PartEdit(Pose):
     def is_noop(self) -> bool:
         return (
             not self.material
+            and not self.recolor
             and self.opacity >= 1.0
             and not any(self.move)
             and not any(self.rotate)
@@ -129,9 +135,17 @@ class PartEdit(Pose):
 
 
 class Keyframe(Pose):
-    """A pose a part passes through, `time` seconds into its clip."""
+    """A pose a part passes through, `time` seconds into its clip.
+
+    `ease` is how the part travels *out* of this key towards the next one --
+    "linear" at a constant rate, "smooth" away and in again gently, "hold" not
+    at all until the next key takes over. It defaults to "linear" so a caller
+    that predates easing gets exactly the motion it always got; the browser
+    always sends one explicitly.
+    """
 
     time: float = Field(0.0, ge=0.0, le=MAX_CLIP_SECONDS)
+    ease: Literal["linear", "smooth", "hold"] = "linear"
 
 
 class Track(BaseModel):

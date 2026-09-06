@@ -485,7 +485,7 @@ function Model({
     parts.map((p) => {
       const edit = edits[p.name]
       return edit && isRestyled(edit)
-        ? [p.name, edit.material, edit.color, edit.opacity, edit.roughness, edit.metalness]
+        ? [p.name, edit.material, edit.color, edit.recolor, edit.opacity, edit.roughness, edit.metalness]
         : 0
     }),
   )
@@ -721,6 +721,27 @@ interface Props {
    * whole page, and anything left outside it is buried underneath.
    */
   children?: ReactNode
+  /** Whether the animation dock is open. Only meaningful with `onAnimate`. */
+  animate?: boolean
+  /**
+   * Turn animation on and off, from the chrome over the model.
+   *
+   * The switch for this lives beside the parts list, which is not on screen at
+   * all once the model fills the window -- and with animation off there is no
+   * dock either, so without this there is no way back in from full screen.
+   * Left out entirely when there is nothing to animate yet.
+   */
+  onAnimate?: (on: boolean) => void
+  /**
+   * A panel docked under the model rather than floating over it: the timeline.
+   *
+   * It shares the viewer's box rather than sitting beside it for the same
+   * reason the overlays do -- filling the window has to carry the timeline
+   * along, or you lose the animation controls exactly when you have the room
+   * to use them. Unlike the overlays it takes its own room, so the model is
+   * never behind it.
+   */
+  dock?: ReactNode
 }
 
 const RESTING_PCT = 40
@@ -813,7 +834,8 @@ const GIZMOS: { mode: Exclude<GizmoMode, null>; label: string; icon: JSX.Element
 export default function ModelViewer({
   url, placeholder, explodeOpen = false, labels = NO_LABELS, edits = NO_EDITS,
   hidden = NO_HIDDEN, selected = NO_SELECTION, onSelect, onEdit, onParts,
-  clip = null, player = null, wholeModel = false, active = true, children,
+  clip = null, player = null, wholeModel = false, active = true, children, dock = null,
+  animate = false, onAnimate,
 }: Props) {
   const [open, setOpen] = useState(explodeOpen)
   const [pct, setPct] = useState(explodeOpen ? RESTING_PCT : 0)
@@ -895,192 +917,219 @@ export default function ModelViewer({
 
   if (!url) {
     return (
-      <div className="viewer">
-        <div className="viewer-empty">{placeholder}</div>
+      <div className={`viewer${dock ? ' docked' : ''}`}>
+        <div className="viewer-stage">
+          <div className="viewer-empty">{placeholder}</div>
+        </div>
+        {dock}
       </div>
     )
   }
 
   return (
-    <div className={`viewer${full ? ' full' : ''}`}>
-      <ViewerBoundary
-        key={url}
-        fallback={<div className="viewer-empty">Preview could not be rendered.<br />The download is still available.</div>}
-      >
-        <Canvas
-          camera={{ position: CAMERA_START, fov: 45, near: 0.01, far: 100 }}
-          dpr={[1, 2]}
-          frameloop={active ? 'always' : 'never'}
-          onPointerMissed={() => onSelect?.(null, false)}
+    <div className={`viewer${full ? ' full' : ''}${dock ? ' docked' : ''}`}>
+      {/* The model and everything drawn over it. The dock below shares the
+          viewer's box rather than floating on top, so the timeline is never
+          covering the assembly it is timing. */}
+      <div className="viewer-stage">
+        <ViewerBoundary
+          key={url}
+          fallback={<div className="viewer-empty">Preview could not be rendered.<br />The download is still available.</div>}
         >
-          <ViewBridge into={view} />
-          <color attach="background" args={['#10131c']} />
-          <ambientLight intensity={0.35} />
-          <directionalLight position={[4, 6, 4]} intensity={1.5} />
-          <directionalLight position={[-5, 2, -3]} intensity={0.5} />
+          <Canvas
+            camera={{ position: CAMERA_START, fov: 45, near: 0.01, far: 100 }}
+            dpr={[1, 2]}
+            frameloop={active ? 'always' : 'never'}
+            onPointerMissed={() => onSelect?.(null, false)}
+          >
+            <ViewBridge into={view} />
+            <color attach="background" args={['#10131c']} />
+            <ambientLight intensity={0.35} />
+            <directionalLight position={[4, 6, 4]} intensity={1.5} />
+            <directionalLight position={[-5, 2, -3]} intensity={0.5} />
 
-          <Suspense fallback={null}>
-            <LocalEnvironment />
-          </Suspense>
+            <Suspense fallback={null}>
+              <LocalEnvironment />
+            </Suspense>
 
-          <Suspense fallback={null}>
-            <Model
-              url={url}
-              separation={pct / 100}
-              showAllLabels={allNames}
-              labels={labels}
-              edits={edits}
-              hidden={hidden}
-              gizmo={gizmo}
-              selected={selected}
-              onSelect={(name, additive) => onSelect?.(name, additive)}
-              onEdit={onEdit}
-              onParts={report}
-              clip={clip}
-              player={player}
-              wholeModel={wholeModel}
-            />
-          </Suspense>
-
-          <Grid
-            args={[10, 10]}
-            cellSize={0.1}
-            sectionSize={0.5}
-            cellColor="#242a3a"
-            sectionColor="#2f3850"
-            fadeDistance={12}
-            fadeStrength={1.2}
-            infiniteGrid
-            position={[0, -0.5, 0]}
-          />
-          <OrbitControls
-            makeDefault
-            enableDamping
-            dampingFactor={0.08}
-            // A wheel notch at the default speed crosses a good part of the
-            // model, which on an assembly you are picking single parts out of
-            // overshoots constantly. Orbit and pan are eased for the same
-            // reason: the useful gesture here is a small adjustment.
-            zoomSpeed={0.35}
-            rotateSpeed={0.45}
-            panSpeed={0.6}
-          />
-        </Canvas>
-      </ViewerBoundary>
-
-      {children}
-
-      <div className="viewer-tools">
-        <button className="viewer-tool" title="Put the camera back where it started" onClick={resetView}>
-          <svg width="14" height="14" viewBox="0 0 24 24" {...stroke}>
-            <path d="M3 12a9 9 0 1 0 2.6-6.4" />
-            <path d="M3 4v5h5" />
-          </svg>
-          Reset view
-        </button>
-
-        <button className={`viewer-tool${open ? ' on' : ''}`} onClick={toggle}>
-          <svg width="14" height="14" viewBox="0 0 24 24" {...stroke}>
-            <path d="M12 2.5v4M12 17.5v4M2.5 12h4M17.5 12h4" />
-            <rect x="9" y="9" width="6" height="6" rx="1" />
-          </svg>
-          {open ? 'Close separation' : 'Separate parts'}
-        </button>
-
-        <button
-          className={`viewer-tool${full ? ' on' : ''}`}
-          title={full ? 'Back to the page (Esc)' : 'Fill the window with the model'}
-          onClick={() => setFull((was) => !was)}
-        >
-          <svg width="14" height="14" viewBox="0 0 24 24" {...stroke}>
-            {full
-              ? <path d="M9 3v6H3M15 3v6h6M9 21v-6H3M15 21v-6h6" />
-              : <path d="M3 9V3h6M21 9V3h-6M3 15v6h6M21 15v6h-6" />}
-          </svg>
-          {full ? 'Exit full screen' : 'Full screen'}
-        </button>
-      </div>
-
-      <div className="viewer-bottom">
-        {parts > 0 && (
-          <div className="explode-stage">
-            <span>{STAGES.find((stage) => pct <= stage.upTo)!.label}</span>
-          </div>
-        )}
-
-        {open && (
-          <div className="explode-panel">
-            <div className="explode-main">
-              <div className="explode-head">
-                <span>Explode model</span>
-                <span className="explode-pct">{pct}<i>%</i></span>
-              </div>
-              <input
-                type="range" min={0} max={100} step={1} value={pct}
-                disabled={parts === 0}
-                aria-label="Separation"
-                onChange={(e) => setPct(Number(e.target.value))}
+            <Suspense fallback={null}>
+              <Model
+                url={url}
+                separation={pct / 100}
+                showAllLabels={allNames}
+                labels={labels}
+                edits={edits}
+                hidden={hidden}
+                gizmo={gizmo}
+                selected={selected}
+                onSelect={(name, additive) => onSelect?.(name, additive)}
+                onEdit={onEdit}
+                onParts={report}
+                clip={clip}
+                player={player}
+                wholeModel={wholeModel}
               />
-              {parts ? (
-                <>
-                  <div className="explode-foot">
-                    <span>Assembled</span>
-                    <span>{parts} parts</span>
-                    <span>Every piece</span>
-                  </div>
-                  <label className="explode-names">
-                    <input type="checkbox" checked={allNames} onChange={(e) => setAllNames(e.target.checked)} />
-                    Name every part at once
-                  </label>
-                </>
-              ) : (
-                <div className="explode-note">
-                  This model is one single part, so there is nothing to pull apart.
-                </div>
-              )}
-            </div>
+            </Suspense>
 
+            <Grid
+              args={[10, 10]}
+              cellSize={0.1}
+              sectionSize={0.5}
+              cellColor="#242a3a"
+              sectionColor="#2f3850"
+              fadeDistance={12}
+              fadeStrength={1.2}
+              infiniteGrid
+              position={[0, -0.5, 0]}
+            />
+            <OrbitControls
+              makeDefault
+              enableDamping
+              dampingFactor={0.08}
+              // A wheel notch at the default speed crosses a good part of the
+              // model, which on an assembly you are picking single parts out of
+              // overshoots constantly. Orbit and pan are eased for the same
+              // reason: the useful gesture here is a small adjustment.
+              zoomSpeed={0.35}
+              rotateSpeed={0.45}
+              panSpeed={0.6}
+            />
+          </Canvas>
+        </ViewerBoundary>
+
+        {children}
+
+        <div className="viewer-tools">
+          <button className="viewer-tool" title="Put the camera back where it started" onClick={resetView}>
+            <svg width="14" height="14" viewBox="0 0 24 24" {...stroke}>
+              <path d="M3 12a9 9 0 1 0 2.6-6.4" />
+              <path d="M3 4v5h5" />
+            </svg>
+            Reset view
+          </button>
+
+          <button className={`viewer-tool${open ? ' on' : ''}`} onClick={toggle}>
+            <svg width="14" height="14" viewBox="0 0 24 24" {...stroke}>
+              <path d="M12 2.5v4M12 17.5v4M2.5 12h4M17.5 12h4" />
+              <rect x="9" y="9" width="6" height="6" rx="1" />
+            </svg>
+            {open ? 'Close separation' : 'Separate parts'}
+          </button>
+
+          {onAnimate && (
             <button
-              className="explode-reset"
-              title="Put every part back where it started"
-              disabled={pct === 0}
-              onClick={() => setPct(0)}
+              className={`viewer-tool${animate ? ' on' : ''}`}
+              title={animate
+                ? 'Put the timeline away and save the model as a still'
+                : 'Open the timeline and animate this model'}
+              onClick={() => onAnimate(!animate)}
             >
-              <svg width="16" height="16" viewBox="0 0 24 24" {...stroke}>
-                <path d="M3 12a9 9 0 1 0 2.6-6.4" />
-                <path d="M3 4v5h5" />
+              <svg width="14" height="14" viewBox="0 0 24 24" {...stroke}>
+                <path d="M3 12h4M17 12h4" />
+                <circle cx="12" cy="12" r="3.2" />
+                <path d="M12 3v3M12 18v3" />
               </svg>
-              Reset
+              {animate ? 'Animation on' : 'Animate'}
             </button>
+          )}
+
+          <button
+            className={`viewer-tool${full ? ' on' : ''}`}
+            title={full ? 'Back to the page (Esc)' : 'Fill the window with the model'}
+            onClick={() => setFull((was) => !was)}
+          >
+            <svg width="14" height="14" viewBox="0 0 24 24" {...stroke}>
+              {full
+                ? <path d="M9 3v6H3M15 3v6h6M9 21v-6H3M15 21v-6h6" />
+                : <path d="M3 9V3h6M21 9V3h-6M3 15v6h6M21 15v6h-6" />}
+            </svg>
+            {full ? 'Exit full screen' : 'Full screen'}
+          </button>
+        </div>
+
+        <div className="viewer-bottom">
+          {parts > 0 && (
+            <div className="explode-stage">
+              <span>{STAGES.find((stage) => pct <= stage.upTo)!.label}</span>
+            </div>
+          )}
+
+          {open && (
+            <div className="explode-panel">
+              <div className="explode-main">
+                <div className="explode-head">
+                  <span>Explode model</span>
+                  <span className="explode-pct">{pct}<i>%</i></span>
+                </div>
+                <input
+                  type="range" min={0} max={100} step={1} value={pct}
+                  disabled={parts === 0}
+                  aria-label="Separation"
+                  onChange={(e) => setPct(Number(e.target.value))}
+                />
+                {parts ? (
+                  <>
+                    <div className="explode-foot">
+                      <span>Assembled</span>
+                      <span>{parts} parts</span>
+                      <span>Every piece</span>
+                    </div>
+                    <label className="explode-names">
+                      <input type="checkbox" checked={allNames} onChange={(e) => setAllNames(e.target.checked)} />
+                      Name every part at once
+                    </label>
+                  </>
+                ) : (
+                  <div className="explode-note">
+                    This model is one single part, so there is nothing to pull apart.
+                  </div>
+                )}
+              </div>
+
+              <button
+                className="explode-reset"
+                title="Put every part back where it started"
+                disabled={pct === 0}
+                onClick={() => setPct(0)}
+              >
+                <svg width="16" height="16" viewBox="0 0 24 24" {...stroke}>
+                  <path d="M3 12a9 9 0 1 0 2.6-6.4" />
+                  <path d="M3 4v5h5" />
+                </svg>
+                Reset
+              </button>
+            </div>
+          )}
+        </div>
+
+        {onEdit && (selected.length > 0 || wholeModel) && (
+          <div className="gizmo-bar">
+            {GIZMOS.map(({ mode, label, icon }) => (
+              <button
+                key={label}
+                className={`gizmo-btn${gizmo === mode ? ' on' : ''}`}
+                title={wholeModel
+                  ? `${label} the whole model`
+                  : `${label} the marked part${selected.length > 1 ? 's' : ''}`}
+                onClick={() => setGizmo((was) => (was === mode ? null : mode))}
+              >
+                {icon}
+                {label}
+              </button>
+            ))}
           </div>
         )}
-      </div>
 
-      {onEdit && (selected.length > 0 || wholeModel) && (
-        <div className="gizmo-bar">
-          {GIZMOS.map(({ mode, label, icon }) => (
-            <button
-              key={label}
-              className={`gizmo-btn${gizmo === mode ? ' on' : ''}`}
-              title={wholeModel
-                ? `${label} the whole model`
-                : `${label} the marked part${selected.length > 1 ? 's' : ''}`}
-              onClick={() => setGizmo((was) => (was === mode ? null : mode))}
-            >
-              {icon}
-              {label}
-            </button>
-          ))}
+        <div className="viewer-hint">
+          {gizmo && (selected.length > 0 || wholeModel)
+            ? clip
+              ? 'drag a handle to key a pose at the playhead · drag elsewhere to orbit'
+              : 'drag a handle to edit · drag elsewhere to orbit'
+            : 'drag to orbit · scroll to zoom · shift-click to mark more'}
         </div>
-      )}
-
-      <div className="viewer-hint">
-        {gizmo && (selected.length > 0 || wholeModel)
-          ? clip
-            ? 'drag a handle to key a pose at the playhead · drag elsewhere to orbit'
-            : 'drag a handle to edit · drag elsewhere to orbit'
-          : 'drag to orbit · scroll to zoom · shift-click to mark more'}
       </div>
+
+      {dock}
     </div>
   )
 }

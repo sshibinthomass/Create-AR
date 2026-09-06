@@ -23,10 +23,10 @@ const BLACK = new Color('#000000')
  * preview that kept the original maps would promise something the saved file
  * does not deliver.
  *
- * With no preset -- opacity on its own -- the opposite holds. Nothing is being
- * replaced, so `from` is copied and only faded, and the part keeps the finish
- * you are turning see-through in order to look through. Every caller owns what
- * comes back and has to dispose of it.
+ * With no preset -- opacity, colour, or both -- the opposite holds. Nothing is
+ * being replaced, so `from` is copied and only the asked-for property changed,
+ * and the part keeps the finish you are fading or tinting. Every caller owns
+ * what comes back and has to dispose of it.
  */
 export function buildMaterial(edit: PartEdit, from?: Material): Material {
   // Below full opacity the part stops writing depth, so whatever sits behind it
@@ -37,6 +37,13 @@ export function buildMaterial(edit: PartEdit, from?: Material): Material {
     copy.transparent = true
     copy.opacity = edit.opacity
     copy.depthWrite = !clear
+    // Recolouring keeps everything else the part wears. Where it has a base
+    // texture three.js multiplies it by this colour rather than replacing it,
+    // which is a tint -- and the exporter tints the same way, so the saved
+    // file looks like the preview.
+    if (edit.recolor && 'color' in copy) {
+      (copy as unknown as { color: Color }).color = new Color(edit.color)
+    }
     return copy
   }
   const preset = MATERIALS[edit.material as keyof typeof MATERIALS]

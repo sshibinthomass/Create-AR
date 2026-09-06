@@ -4,7 +4,7 @@ import {
   type Capabilities, type Clip, type Handoff, type Health, type NamerSettings,
   type PartDetails, type PartEdit, type PartsDoc,
 } from '../api'
-import { newClip, pruneClips, setKey, splitPose, unpivot } from '../animation'
+import { copyClip, newClip, pruneClips, reverseClip, setKey, splitPose, unpivot } from '../animation'
 import AnimEditor from '../components/AnimEditor'
 import Dropzone from '../components/Dropzone'
 import PartDialog from '../components/PartDialog'
@@ -128,6 +128,27 @@ export default function AnalysisView({
     })
   }, [])
 
+  /**
+   * Copy a clip, and copy it backwards.
+   *
+   * Taking a product apart and putting it back together are the same movement
+   * run in opposite directions, so an assembly animation is a disassembly one
+   * duplicated and reversed -- which is the whole reason both are one click.
+   */
+  const cloneClip = useCallback((id: string, flip: boolean) => {
+    setClips((all) => {
+      const from = all.find((c) => c.id === id)
+      if (!from) return all
+      const made = copyClip(
+        flip ? reverseClip(from) : from,
+        flip ? `${from.name} reversed` : `${from.name} copy`,
+      )
+      setClipId(made.id)
+      const at = all.indexOf(from) + 1
+      return [...all.slice(0, at), made, ...all.slice(at)]
+    })
+  }, [])
+
   /** Turning animation on for the first time gives you a clip to start in. */
   const toggleAnimate = useCallback((on: boolean) => {
     setAnimate(on)
@@ -153,6 +174,7 @@ export default function AnalysisView({
       scale: axis((e) => e.scale, 1),
       material: same((e) => e.material, ''),
       color: same((e) => e.color, NO_EDIT.color),
+      recolor: same((e) => e.recolor, false),
       opacity: same((e) => e.opacity, NO_EDIT.opacity),
       roughness: same((e) => e.roughness, NO_EDIT.roughness),
       metalness: same((e) => e.metalness, NO_EDIT.metalness),
@@ -176,15 +198,16 @@ export default function AnalysisView({
             [number, number, number]
         // Every scalar follows the same rule as the axes: a value the panel is
         // still showing as the group's own is one the user has not touched.
-        const held = <K extends 'material' | 'color' | 'opacity' | 'roughness' | 'metalness'>(
-          to: K,
-        ) => (next[to] === shared[to] ? own[to] : next[to])
+        const held = <
+          K extends 'material' | 'color' | 'recolor' | 'opacity' | 'roughness' | 'metalness',
+        >(to: K) => (next[to] === shared[to] ? own[to] : next[to])
         copy[name] = {
           move: kept('move'),
           rotate: kept('rotate'),
           scale: kept('scale'),
           material: held('material'),
           color: held('color'),
+          recolor: held('recolor'),
           opacity: held('opacity'),
           roughness: held('roughness'),
           metalness: held('metalness'),
@@ -212,6 +235,9 @@ export default function AnalysisView({
   }, [])
 
   const gone = useMemo(() => new Set(removed), [removed])
+  // The parts still in the model: what the timeline offers to mark, since a
+  // part left out of the save has nothing to animate.
+  const living = useMemo(() => parts.filter((n) => !gone.has(n)), [parts, gone])
 
   /** Leave a part out of the saved model. Its name and description stay put. */
   const drop = useCallback((name: string) => {
@@ -863,6 +889,22 @@ export default function AnalysisView({
                           {c.duration}s · {keys ? `${keys} key${keys === 1 ? '' : 's'}` : 'empty'}
                         </span>
                         <button
+                          className="clip-act"
+                          disabled={!keys}
+                          title="Copy this animation running backwards — a teardown reversed is the assembly"
+                          onClick={(e) => { e.stopPropagation(); cloneClip(c.id, true) }}
+                        >
+                          Reverse
+                        </button>
+                        <button
+                          className="clip-act"
+                          disabled={!keys}
+                          title="Make a copy of this animation to vary"
+                          onClick={(e) => { e.stopPropagation(); cloneClip(c.id, false) }}
+                        >
+                          Copy
+                        </button>
+                        <button
                           className="part-drop"
                           title="Delete this animation"
                           onClick={(e) => { e.stopPropagation(); dropClip(c.id) }}
@@ -937,6 +979,33 @@ export default function AnalysisView({
               player={player}
               wholeModel={wholeModel}
               active={active}
+              animate={animate}
+              // Only once the model has parts: there is nothing to animate
+              // before that, and the button would be a dead end.
+              onAnimate={parts.length > 0 ? toggleAnimate : undefined}
+              dock={clip && (
+                <Timeline
+                  clip={clip}
+                  clips={clips}
+                  player={player}
+                  targets={animTargets}
+                  parts={living}
+                  selected={selected}
+                  subject={subject}
+                  label={labelOf}
+                  onClip={updateClip}
+                  onPickClip={setClipId}
+                  onAddClip={addClip}
+                  onPick={(t, additive) => {
+                    if (t === WHOLE) pickWhole()
+                    else mark(t, additive)
+                  }}
+                  onSubject={(next) => {
+                    if (next === 'model') pickWhole()
+                    else setSubject('parts')
+                  }}
+                />
+              )}
               placeholder={
                 analysis.job?.status === 'error'
                   ? 'That model could not be read — see the message on the left.'
@@ -1005,16 +1074,6 @@ export default function AnalysisView({
               )}
             </ModelViewer>
           </Suspense>
-
-          {clip && (
-            <Timeline
-              clip={clip}
-              player={player}
-              label={labelOf}
-              onClip={updateClip}
-              onPick={(t) => { if (t === WHOLE) pickWhole(); else mark(t, false) }}
-            />
-          )}
 
           {(analysis.busy || analysis.uploading) && (
             <div className="card-body">

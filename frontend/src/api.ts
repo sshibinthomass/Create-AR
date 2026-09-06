@@ -108,9 +108,20 @@ export interface Pose {
   scale: [number, number, number]
 }
 
+/**
+ * How a part travels *out* of a keyframe, towards the next one.
+ *
+ * Three, because an assembly study needs three: parts that slide at a constant
+ * rate, parts that pull away and settle the way a hand would move them, and
+ * parts that sit still until a moment and then are simply elsewhere.
+ */
+export type Ease = 'linear' | 'smooth' | 'hold'
+
 /** A pose a part passes through, `time` seconds into its clip. */
 export interface Keyframe extends Pose {
   time: number
+  /** Absent means `linear` -- what every clip made before easing existed did. */
+  ease?: Ease
 }
 
 /** The target of a track that moves the whole model rather than one part. */
@@ -143,6 +154,17 @@ export interface Clip {
 export interface PartEdit extends Pose {
   material: MaterialType
   color: string                     // '#rrggbb'
+  /**
+   * Whether `color` is applied when no preset is chosen.
+   *
+   * A preset always paints in `color`, so this means nothing to one. Without a
+   * preset it is the difference between "leave the part as the file shades it"
+   * and "leave it, but in this colour" -- picking a part out of an assembly by
+   * eye without pretending it is made of something else. Where the part is
+   * textured the colour tints the texture rather than replacing it, which is
+   * what the exporter does too.
+   */
+  recolor: boolean
   /**
    * How solid the part is. 1 is the part as the file has it.
    *
@@ -177,13 +199,14 @@ export const MATERIALS: Record<Exclude<MaterialType, ''>, {
 
 export const NO_EDIT: PartEdit = {
   move: [0, 0, 0], rotate: [0, 0, 0], scale: [1, 1, 1], material: '', color: '#9aa6c0',
+  recolor: false,
   opacity: 1,
   roughness: MATERIALS.plastic.roughness, metalness: MATERIALS.plastic.metalness,
 }
 
 /** Whether an edit changes how the part is shaded, as opposed to where it sits. */
 export const isRestyled = (e: PartEdit | undefined): boolean =>
-  e != null && (e.material !== '' || e.opacity < 1)
+  e != null && (e.material !== '' || e.opacity < 1 || e.recolor)
 
 export const isEdited = (e: PartEdit | undefined): boolean =>
   e != null && (isRestyled(e)

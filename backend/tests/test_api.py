@@ -462,6 +462,30 @@ def test_reexport_moves_scales_and_restyles_a_part():
     assert pbr.get("metallicFactor", 1.0) == pytest.approx(1.0)
 
 
+def test_recolouring_keeps_the_part_a_change_worth_saving():
+    """A colour with no preset is a real edit, and must survive `is_noop`.
+
+    Everything else about such an edit looks untouched -- no material, full
+    opacity, no move -- so without the flag it is filtered out as a part the
+    user never changed, and the colour silently never reaches the file.
+    """
+    from app.main import Options, PartEdit
+
+    assert PartEdit().recolor is False
+    assert PartEdit().is_noop()
+    # The colour alone, with the part's own material left in place.
+    assert not PartEdit(color="#ff2d2d", recolor=True).is_noop()
+    # A colour nobody asked to apply is still nothing.
+    assert PartEdit(color="#ff2d2d").is_noop()
+
+    opts = Options(edits={
+        "tinted": {"color": "#ff2d2d", "recolor": True},
+        "just a colour": {"color": "#ff2d2d"},
+    })
+    assert set(opts.edits) == {"tinted"}
+    assert opts.edits["tinted"].material == ""   # the finish is left alone
+
+
 def test_opacity_and_finish_are_part_of_an_edit():
     from app.main import Options
 
@@ -780,6 +804,77 @@ def test_clips_are_cleaned_and_capped():
         Options(clips=[{"tracks": [{"target": "a", "keys": [{"time": 0, "scale": [0, 1, 1]}]}]}])
     with pytest.raises(ValidationError):
         Options(clips=[{"tracks": [{"target": "a", "keys": []}]}] * 33)
+
+
+def _lift_from_blender_job(name):
+    """One function out of blender_job.py, without importing bpy.
+
+    The animation block is deliberately free of Blender types -- it is the half
+    of the exporter that has to agree with the browser -- so it can be compiled
+    and run on its own.
+    """
+    import pathlib
+
+    src = (pathlib.Path(__file__).resolve().parents[1] / "app" / "blender_job.py").read_text(
+        encoding="utf-8")
+    block = src[src.index("def _shape("):src.index("def write_samples(")]
+    scope = {}
+    exec(compile(block, "blender_job.py", "exec"), scope)
+    return scope[name]
+
+
+def test_keyframe_easing_is_optional_and_checked():
+    from app.main import Options
+
+    opts = Options(clips=[{
+        "duration": 2.0,
+        "tracks": [{"target": "a", "keys": [
+            {"time": 0.0, "ease": "smooth"},
+            {"time": 1.0, "ease": "hold"},
+            {"time": 2.0},                      # a caller that predates easing
+        ]}],
+    }])
+    keys = opts.clips[0].tracks[0].keys
+    assert [k.ease for k in keys] == ["smooth", "hold", "linear"]
+
+    with pytest.raises(ValidationError):
+        Options(clips=[{"tracks": [
+            {"target": "a", "keys": [{"time": 0.0, "ease": "bounce"}]}]}])
+
+
+def test_sampling_follows_the_ease_of_the_key_being_left():
+    """The baker has to match `poseAt` in the browser, or the saved file plays
+    differently from the preview it was built in."""
+    # blender_job runs inside Blender and imports bpy at the top, so it cannot
+    # be imported here. The sampling itself is plain arithmetic on dicts, so it
+    # is lifted out of the source and exercised on its own.
+    sample_pose = _lift_from_blender_job("sample_pose")
+
+    keys = [
+        {"time": 0.0, "move": [0, 0, 0], "rotate": [0, 0, 0], "scale": [1, 1, 1],
+         "ease": "linear"},
+        {"time": 1.0, "move": [10, 0, 0], "rotate": [0, 0, 0], "scale": [1, 1, 1],
+         "ease": "hold"},
+        {"time": 2.0, "move": [20, 0, 0], "rotate": [0, 0, 0], "scale": [1, 1, 1],
+         "ease": "smooth"},
+        {"time": 3.0, "move": [30, 0, 0], "rotate": [0, 0, 0], "scale": [1, 1, 1]},
+    ]
+    # Linear: straight through the middle of the first second.
+    assert sample_pose(keys, 0.5)["move"][0] == pytest.approx(5.0)
+    # Hold: the part stays where it was for the whole span. The step belongs to
+    # the moment *after* the next key -- the earlier key owns its own boundary,
+    # which is what `poseAt` does too, so preview and file step on the same frame.
+    assert sample_pose(keys, 1.5)["move"][0] == pytest.approx(10.0)
+    assert sample_pose(keys, 1.999)["move"][0] == pytest.approx(10.0)
+    assert sample_pose(keys, 2.0)["move"][0] == pytest.approx(10.0)
+    assert sample_pose(keys, 2.001)["move"][0] == pytest.approx(20.0, abs=1e-3)
+    # Smooth: symmetric about the middle, and slower than linear at the ends.
+    assert sample_pose(keys, 2.5)["move"][0] == pytest.approx(25.0)
+    assert sample_pose(keys, 2.25)["move"][0] == pytest.approx(21.5625)
+    assert sample_pose(keys, 2.75)["move"][0] == pytest.approx(28.4375)
+    # Held before the first key and after the last, as before.
+    assert sample_pose(keys, -1.0)["move"][0] == 0.0
+    assert sample_pose(keys, 99.0)["move"][0] == 30.0
 
 
 def test_clips_are_refused_on_a_format_that_cannot_carry_them():

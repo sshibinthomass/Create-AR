@@ -169,11 +169,27 @@ export default function PartEditor({
             <option key={key} value={key}>{m.label}</option>
           ))}
         </select>
+        {/* Enabled whether or not a preset is chosen: recolouring a part is
+            how you pick it out of an assembly, and wanting it red is no reason
+            to throw away what the file shaded it with. Choosing a colour with
+            no preset turns recolouring on; the arrow hands the part its own
+            colour back. */}
         <input
-          type="color" value={value.color} disabled={!value.material}
+          type="color" value={value.color}
           aria-label="Part colour"
-          onChange={(e) => set('color', e.target.value)}
+          onChange={(e) => onChange(
+            { ...value, color: e.target.value, recolor: value.material ? value.recolor : true })}
         />
+        {!value.material && value.recolor && (
+          <button
+            className="edit-uncolour"
+            title="Put the part's own colour back"
+            aria-label="Stop recolouring this part"
+            onClick={() => set('recolor', false)}
+          >
+            ↺
+          </button>
+        )}
       </div>
 
       {/* Opacity needs no preset: fading a housing to see inside it is worth
@@ -202,9 +218,14 @@ export default function PartEditor({
           ? `A new material replaces everything the part was shaded with, its
              textures included. Rough and metal start where the preset puts them
              and are yours to nudge.`
-          : `Opacity works on the part as it is. Rough and metal need a material
-             to apply to — there is no telling what the file shaded this part
-             with, so there is no value that would mean “leave it alone”.`}
+          : value.recolor
+            ? `The part keeps its own finish and only its colour changes. Where
+               it carries a texture the colour tints it rather than covering it.
+               Rough and metal still need a material to apply to.`
+            : `Colour and opacity work on the part as it is. Rough and metal need
+               a material to apply to — there is no telling what the file shaded
+               this part with, so there is no value that would mean “leave it
+               alone”.`}
       </div>
     </div>
   )
