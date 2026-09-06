@@ -700,6 +700,10 @@ docker run -d -p 8080:8080 -v converter-data:/data --name converter create-ar-co
 Open <http://localhost:8080>. Nothing else is required — the image contains
 Blender, the API and the built frontend.
 
+Each view has its own address — `/convert`, `/analysis` and `/settings` — so a
+tab can be bookmarked, shared or opened in a second window, and the browser's
+back button steps between them. `/` is the converter.
+
 ### Local development
 
 Needs **Blender 4.2+** (developed against 5.2 LTS), **Python 3.11+** and

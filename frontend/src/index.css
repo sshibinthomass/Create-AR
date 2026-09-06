@@ -63,7 +63,7 @@ button:disabled { cursor: not-allowed; }
 .tabs { display: flex; gap: 4px; padding: 3px; border-radius: 9px; background: var(--panel-2); border: 1px solid var(--line); }
 .tab {
   padding: 5px 12px; border-radius: 7px; border: none; background: none;
-  color: var(--muted); font-size: 13px; font-weight: 550;
+  color: var(--muted); font-size: 13px; font-weight: 550; text-decoration: none;
   transition: background .12s, color .12s;
 }
 .tab:hover { color: var(--text); }
@@ -979,7 +979,7 @@ input[type='range'] { width: 110px; accent-color: var(--accent); }
   display: flex; align-items: center; justify-content: center;
   width: 30px; height: 30px; flex: none;
   background: var(--panel-2); border: 1px solid var(--line);
-  border-radius: 8px; color: var(--muted);
+  border-radius: 8px; color: var(--muted); text-decoration: none;
 }
 .gear:hover { color: var(--text); border-color: #38405a; }
 .gear.sel { color: var(--accent); border-color: var(--accent); background: var(--accent-soft); }

@@ -1267,3 +1267,27 @@ def test_same_format_in_and_out_is_a_compression_pass():
 
     out = client.get(f"/api/jobs/{again['id']}/download").content
     assert _glb_image_sizes(out) == [(16, 16)], _glb_image_sizes(out)
+
+
+# --- the SPA -----------------------------------------------------------------
+
+needs_ui_build = pytest.mark.skipif(
+    not (config.REPO_DIR / "frontend" / "dist" / "index.html").exists(),
+    reason="frontend has not been built",
+)
+
+
+@needs_ui_build
+@pytest.mark.parametrize("path", ["/", "/convert", "/analysis", "/settings"])
+def test_every_view_has_its_own_address(path):
+    r = client.get(path)
+    assert r.status_code == 200, path
+    assert r.headers["content-type"].startswith("text/html")
+
+
+@needs_ui_build
+def test_missing_asset_and_unknown_api_route_still_404():
+    # The index.html fallback must not swallow these: an asset served as HTML
+    # breaks in the browser, and a bad API path deserves a straight answer.
+    assert client.get("/assets/does-not-exist.js").status_code == 404
+    assert client.get("/api/does-not-exist").status_code == 404
