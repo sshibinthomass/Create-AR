@@ -113,8 +113,65 @@ interface Part {
   base: Vector3    // its resting position
   baseQuat: Quaternion  // and the rest of its resting pose, which an edit replaces
   baseScale: Vector3
-  offset: Vector3  // where one unit of separation takes it, in the same space
+  offset: Vector3  // where one unit of radial separation takes it, in the same space
+  toSlot: Vector3  // and where its cell of the fully laid-out sheet is
   centre: Vector3  // its bounding-box centre, in its own local space
+}
+
+/** Room left around a part inside its cell, as a multiple of the part itself. */
+const CELL_PAD = 1.2
+/** Roughly the shape a viewport is, so the laid-out sheet reads as one page. */
+const SHEET_ASPECT = 2.4
+
+/**
+ * Where every part goes once the slider is pushed all the way: a flat sheet of
+ * cells, one part to a cell, tallest first.
+ *
+ * Shelf packing rather than a uniform grid. Parts of one assembly differ in
+ * size by orders of magnitude -- a car body and a screw -- so cells cut to the
+ * largest would strand the small ones as specks in acres of nothing. Giving
+ * each row only the height its own parts need keeps the sheet dense, which is
+ * what makes it readable as an inventory rather than a scatter.
+ *
+ * Returned relative to the sheet's own centre, in the parts' parent space.
+ */
+function shelfSlots(sizes: Vector3[], extent: number): Vector3[] {
+  // A part with no thickness on an axis -- a flat panel, a pane of glass --
+  // would otherwise be handed a cell of no width and stack on its neighbour.
+  const floor = extent * 0.012
+  const cells = sizes.map((s) => ({
+    w: Math.max(s.x, floor) * CELL_PAD,
+    h: Math.max(s.y, floor) * CELL_PAD,
+  }))
+  const order = cells.map((_, i) => i).sort((a, b) => cells[b].h - cells[a].h)
+  const target = Math.sqrt(cells.reduce((a, c) => a + c.w * c.h, 0) * SHEET_ASPECT)
+
+  const slots: Vector3[] = new Array(sizes.length)
+  const row: number[] = []
+  let x = 0, top = 0, height = 0, width = 0
+
+  // A row's height is only known once it is full, and its parts are centred on
+  // it rather than hung from its top -- so they are given a y at that point,
+  // not when they are placed.
+  const settle = () => {
+    for (const i of row) slots[i].y = top - height / 2
+    row.length = 0
+  }
+
+  for (const i of order) {
+    const cell = cells[i]
+    if (x > 0 && x + cell.w > target) { settle(); top -= height; x = 0; height = 0 }
+    slots[i] = new Vector3(x + cell.w / 2, 0, 0)
+    row.push(i)
+    x += cell.w
+    width = Math.max(width, x)
+    height = Math.max(height, cell.h)
+  }
+  settle()
+
+  // Packed from a top-left origin; move the whole sheet onto that origin.
+  const shift = new Vector3(-width / 2, (height - top) / 2, 0)
+  return slots.map((s) => s.add(shift))
 }
 
 /**
@@ -132,6 +189,30 @@ function buildParts(scene: Object3D, names: Map<Object3D, string>): Assembly {
   const centre = whole.getCenter(new Vector3())
   const radius = whole.getSize(new Vector3()).length() / 2 || 1
 
+  // A part's position lives in its parent's space, so that is the space the
+  // separation and the move sliders both have to reach across. It and world
+  // space can differ wildly: a Sketchfab export wraps the whole model in a
+  // scaled root, which leaves the assembly a couple of hundredths of a unit
+  // across in world space while its parts sit whole units apart in their own.
+  // The parts are siblings, so one inverse serves the lot.
+  const parent = nodes[0].parent!
+  const fromWorld = new Matrix4().copy(parent.matrixWorld).invert()
+  const toParent = new Matrix3().setFromMatrix4(parent.matrixWorld).invert()
+
+  const span = whole.getSize(new Vector3()).applyMatrix3(toParent)
+  const reach = Math.max(Math.abs(span.x), Math.abs(span.y), Math.abs(span.z))
+  const extent = Number.isFinite(reach) && reach > 0 ? reach : 1
+
+  // What the sheet is packed from, and what a slot has to be measured against:
+  // where each part sits, and how big it is, in the space it will be moved in.
+  const centres = boxes.map((b) => b.getCenter(new Vector3()).applyMatrix4(fromWorld))
+  const sizes = boxes.map((b) => {
+    const s = b.getSize(new Vector3()).applyMatrix3(toParent)
+    return s.set(Math.abs(s.x), Math.abs(s.y), Math.abs(s.z))
+  })
+  const sheet = shelfSlots(sizes, extent)
+  const sheetCentre = centre.clone().applyMatrix4(fromWorld)
+
   const parts = nodes.map((node, i) => {
     const offset = boxes[i].getCenter(new Vector3()).sub(centre)
     // A part sitting near the centre of the assembly -- a core inside a housing
@@ -142,9 +223,6 @@ function buildParts(scene: Object3D, names: Map<Object3D, string>): Assembly {
     if (offset.length() < own / 2) {
       offset.copy(spiralDirection(i, nodes.length)).multiplyScalar(radius * 0.4)
     }
-    // The offset is measured in world space but assigned to a local position,
-    // so undo whatever rotation and scale the parent contributes.
-    const toLocal = new Matrix3().setFromMatrix4(node.parent!.matrixWorld).invert()
     // Kept in the part's own space, so it survives the part being moved about.
     const localCentre = node.worldToLocal(boxes[i].getCenter(new Vector3()))
     return {
@@ -153,20 +231,18 @@ function buildParts(scene: Object3D, names: Map<Object3D, string>): Assembly {
       base: node.position.clone(),
       baseQuat: node.quaternion.clone(),
       baseScale: node.scale.clone(),
-      offset: offset.applyMatrix3(toLocal),
+      // The offset is measured in world space but assigned to a local position,
+      // so undo whatever rotation and scale the parent contributes.
+      offset: offset.applyMatrix3(toParent),
+      // A slot is where the part's *visible* centre has to land, which is not
+      // its origin: exporters routinely leave every part's origin on the world
+      // origin and carry the shape as an offset inside it.
+      toSlot: sheet[i].add(sheetCentre).sub(centres[i]),
       centre: localCentre,
     }
   })
 
-  // A part's position lives in its parent's space, so that is the space the
-  // move sliders have to reach across. The two can differ wildly: a Sketchfab
-  // export wraps the whole model in a scaled root, which leaves the assembly
-  // a couple of hundredths of a unit across in world space while its parts sit
-  // whole units apart in their own.
-  const toParent = new Matrix3().setFromMatrix4(nodes[0].parent!.matrixWorld).invert()
-  const span = whole.getSize(new Vector3()).applyMatrix3(toParent)
-  const reach = Math.max(Math.abs(span.x), Math.abs(span.y), Math.abs(span.z))
-  return { parts, reach: Number.isFinite(reach) && reach > 0 ? reach : 1 }
+  return { parts, reach: extent }
 }
 
 const DEG = Math.PI / 180
@@ -198,6 +274,28 @@ function buildMaterial(edit: PartEdit): Material {
   })
 }
 
+/** How far the radial burst throws a part, as a multiple of its own offset. */
+const RADIAL_REACH = 1.4
+/** The point in the travel at which the sheet starts to gather the parts in. */
+const SHEET_FROM = 0.5
+
+/**
+ * Where the separation slider has pushed a part, in its parent's space.
+ *
+ * The travel runs through two arrangements rather than one. The first half is
+ * a radial burst, which keeps the assembly recognisable while it opens up and
+ * is what you want for looking inside something. Past the halfway mark the
+ * parts are drawn instead into their cells of a flat sheet, so the far end of
+ * the slider is a laid-out inventory of every piece rather than a cloud that
+ * simply got bigger. The crossover is eased so neither arrangement snaps in.
+ */
+function displace(part: Part, separation: number, into: Vector3): Vector3 {
+  into.copy(part.offset).multiplyScalar(separation * RADIAL_REACH)
+  if (separation <= SHEET_FROM) return into
+  const k = (separation - SHEET_FROM) / (1 - SHEET_FROM)
+  return into.lerp(part.toSlot, k * k * (3 - 2 * k))
+}
+
 /**
  * Put a part into its edited pose: its rest transform with the edit's deltas
  * laid on top, plus however far the separation slider has pushed it out.
@@ -211,7 +309,7 @@ function poseNode(part: Part, edit: PartEdit, separation: number) {
   const { node } = part
   node.position.copy(part.base)
     .add(new Vector3(edit.move[0], edit.move[1], edit.move[2]))
-    .addScaledVector(part.offset, separation)
+    .add(displace(part, separation, new Vector3()))
   node.quaternion.copy(part.baseQuat).multiply(
     new Quaternion().setFromEuler(
       new Euler(edit.rotate[0] * DEG, edit.rotate[1] * DEG, edit.rotate[2] * DEG, 'XYZ')))
@@ -233,7 +331,7 @@ function readNode(part: Part, separation: number, previous: PartEdit): PartEdit 
   const { node } = part
   const move = node.position.clone()
     .sub(part.base)
-    .addScaledVector(part.offset, -separation)
+    .sub(displace(part, separation, new Vector3()))
   const spin = new Euler().setFromQuaternion(
     part.baseQuat.clone().invert().multiply(node.quaternion), 'XYZ')
   return {
@@ -625,6 +723,20 @@ interface Props {
 }
 
 const RESTING_PCT = 40
+
+/**
+ * What the model currently *is*, named under it as the slider travels.
+ *
+ * The arrangement changes character twice over the travel, and the caption is
+ * how you know which one you are looking at without having to read the number.
+ * Matched to `displace`: the sheet only starts gathering past halfway, so it is
+ * not called an inventory until it has all but finished forming one.
+ */
+const STAGES: { upTo: number; label: string }[] = [
+  { upTo: 4, label: 'Assembled model' },
+  { upTo: 89, label: 'Separated parts' },
+  { upTo: 100, label: 'Part inventory' },
+]
 const NO_LABELS: Record<string, string> = {}
 const NO_EDITS: Record<string, PartEdit> = {}
 const NO_SELECTION: readonly string[] = []
@@ -705,6 +817,7 @@ export default function ModelViewer({
   const [allNames, setAllNames] = useState(false)
   const [parts, setParts] = useState(0)
   const [gizmo, setGizmo] = useState<GizmoMode>(null)
+  const [full, setFull] = useState(false)
   // Only ever asked to reset, so the concrete controls type is not worth
   // importing -- drei takes it from three-stdlib, not from @types/three.
   const view = useRef<View | null>(null)
@@ -758,6 +871,25 @@ export default function ModelViewer({
     })
   }, [])
 
+  /**
+   * Filling the window is a fixed overlay rather than the Fullscreen API.
+   * Taking the element fullscreen for real moves it in the layout, and the
+   * WebGL canvas is torn down and rebuilt around that -- which on a heavy
+   * assembly is a visible stall every time, and loses the camera with it.
+   * Escape leaves, because that is what every fullscreen view has taught.
+   */
+  useEffect(() => {
+    if (!full) return
+    const leave = (e: KeyboardEvent) => { if (e.key === 'Escape') setFull(false) }
+    const scroll = document.body.style.overflow
+    document.body.style.overflow = 'hidden'
+    window.addEventListener('keydown', leave)
+    return () => {
+      document.body.style.overflow = scroll
+      window.removeEventListener('keydown', leave)
+    }
+  }, [full])
+
   if (!url) {
     return (
       <div className="viewer">
@@ -767,7 +899,7 @@ export default function ModelViewer({
   }
 
   return (
-    <div className="viewer">
+    <div className={`viewer${full ? ' full' : ''}`}>
       <ViewerBoundary
         key={url}
         fallback={<div className="viewer-empty">Preview could not be rendered.<br />The download is still available.</div>}
@@ -791,7 +923,7 @@ export default function ModelViewer({
           <Suspense fallback={null}>
             <Model
               url={url}
-              separation={(pct / 100) * 1.2}
+              separation={pct / 100}
               showAllLabels={allNames}
               labels={labels}
               edits={edits}
@@ -829,57 +961,91 @@ export default function ModelViewer({
         </Canvas>
       </ViewerBoundary>
 
-      <button
-        className="view-reset"
-        title="Put the camera back where it started"
-        onClick={resetView}
-      >
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-             strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
-          <path d="M3 12a9 9 0 1 0 2.6-6.4" />
-          <path d="M3 4v5h5" />
-        </svg>
-        Reset view
-      </button>
+      <div className="viewer-tools">
+        <button className="viewer-tool" title="Put the camera back where it started" onClick={resetView}>
+          <svg width="14" height="14" viewBox="0 0 24 24" {...stroke}>
+            <path d="M3 12a9 9 0 1 0 2.6-6.4" />
+            <path d="M3 4v5h5" />
+          </svg>
+          Reset view
+        </button>
 
-      <button className={`explode-btn${open ? ' on' : ''}`} onClick={toggle}>
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-             strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
-          <path d="M12 2.5v4M12 17.5v4M2.5 12h4M17.5 12h4" />
-          <rect x="9" y="9" width="6" height="6" rx="1" />
-        </svg>
-        {open ? 'Close separation' : 'Separate parts'}
-      </button>
+        <button className={`viewer-tool${open ? ' on' : ''}`} onClick={toggle}>
+          <svg width="14" height="14" viewBox="0 0 24 24" {...stroke}>
+            <path d="M12 2.5v4M12 17.5v4M2.5 12h4M17.5 12h4" />
+            <rect x="9" y="9" width="6" height="6" rx="1" />
+          </svg>
+          {open ? 'Close separation' : 'Separate parts'}
+        </button>
 
-      {open && (
-        <div className="explode-panel">
-          <div className="explode-head">
-            <span>Exploded view</span>
-            <span>{parts ? `${parts} parts` : 'single part'}</span>
+        <button
+          className={`viewer-tool${full ? ' on' : ''}`}
+          title={full ? 'Back to the page (Esc)' : 'Fill the window with the model'}
+          onClick={() => setFull((was) => !was)}
+        >
+          <svg width="14" height="14" viewBox="0 0 24 24" {...stroke}>
+            {full
+              ? <path d="M9 3v6H3M15 3v6h6M9 21v-6H3M15 21v-6h6" />
+              : <path d="M3 9V3h6M21 9V3h-6M3 15v6h6M21 15v6h-6" />}
+          </svg>
+          {full ? 'Exit full screen' : 'Full screen'}
+        </button>
+      </div>
+
+      <div className="viewer-bottom">
+        {parts > 0 && (
+          <div className="explode-stage">
+            <span>{STAGES.find((stage) => pct <= stage.upTo)!.label}</span>
           </div>
-          <input
-            type="range" min={0} max={100} step={1} value={pct}
-            disabled={parts === 0}
-            aria-label="Separation"
-            onChange={(e) => setPct(Number(e.target.value))}
-          />
-          {parts ? (
-            <>
-              <div className="explode-foot">
-                <span>Assembled</span><span>{pct}%</span><span>Separated</span>
+        )}
+
+        {open && (
+          <div className="explode-panel">
+            <div className="explode-main">
+              <div className="explode-head">
+                <span>Explode model</span>
+                <span className="explode-pct">{pct}<i>%</i></span>
               </div>
-              <label className="explode-names">
-                <input type="checkbox" checked={allNames} onChange={(e) => setAllNames(e.target.checked)} />
-                Name every part at once
-              </label>
-            </>
-          ) : (
-            <div className="explode-note">
-              This model is one single part, so there is nothing to pull apart.
+              <input
+                type="range" min={0} max={100} step={1} value={pct}
+                disabled={parts === 0}
+                aria-label="Separation"
+                onChange={(e) => setPct(Number(e.target.value))}
+              />
+              {parts ? (
+                <>
+                  <div className="explode-foot">
+                    <span>Assembled</span>
+                    <span>{parts} parts</span>
+                    <span>Every piece</span>
+                  </div>
+                  <label className="explode-names">
+                    <input type="checkbox" checked={allNames} onChange={(e) => setAllNames(e.target.checked)} />
+                    Name every part at once
+                  </label>
+                </>
+              ) : (
+                <div className="explode-note">
+                  This model is one single part, so there is nothing to pull apart.
+                </div>
+              )}
             </div>
-          )}
-        </div>
-      )}
+
+            <button
+              className="explode-reset"
+              title="Put every part back where it started"
+              disabled={pct === 0}
+              onClick={() => setPct(0)}
+            >
+              <svg width="16" height="16" viewBox="0 0 24 24" {...stroke}>
+                <path d="M3 12a9 9 0 1 0 2.6-6.4" />
+                <path d="M3 4v5h5" />
+              </svg>
+              Reset
+            </button>
+          </div>
+        )}
+      </div>
 
       {onEdit && selected.length > 0 && (
         <div className="gizmo-bar">

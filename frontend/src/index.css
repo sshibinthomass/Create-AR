@@ -294,54 +294,92 @@ input[type='range'] { width: 110px; accent-color: var(--accent); }
   font-size: 11px; color: var(--dim); pointer-events: none;
 }
 
-/* ---------- exploded view ---------- */
+/* ---------- viewer chrome ---------- */
 
-.explode-btn {
-  position: absolute; top: 10px; right: 10px;
+.viewer-tools {
+  position: absolute; top: 10px; right: 10px; z-index: 5;
+  display: flex; gap: 6px;
+}
+.viewer-tool {
   display: inline-flex; align-items: center; gap: 6px;
   padding: 6px 11px; border-radius: 8px;
   background: rgba(18, 21, 29, .82); border: 1px solid var(--line);
-  color: var(--muted); font-size: 12px; backdrop-filter: blur(6px);
+  color: var(--muted); font-size: 12px; white-space: nowrap;
+  backdrop-filter: blur(6px);
   transition: color .12s, border-color .12s, background .12s;
 }
-.explode-btn:hover { color: var(--text); border-color: #38405a; }
-.explode-btn.on { color: var(--accent); border-color: var(--accent); background: rgba(91, 140, 255, .14); }
+.viewer-tool:hover { color: var(--text); border-color: #38405a; }
+.viewer-tool.on { color: var(--accent); border-color: var(--accent); background: rgba(91, 140, 255, .14); }
 
-/* Sits beside the separation button, sharing its look. */
-.view-reset {
-  position: absolute; top: 10px; right: 150px;
-  display: inline-flex; align-items: center; gap: 6px;
-  padding: 6px 11px; border-radius: 8px;
-  background: rgba(18, 21, 29, .82); border: 1px solid var(--line);
-  color: var(--muted); font-size: 12px; backdrop-filter: blur(6px);
-  transition: color .12s, border-color .12s;
+/* Filling the window: a fixed overlay, so the canvas is never re-created and
+   the camera survives the change. Beats the per-tab height rules by coming
+   later, which is why this block sits below the analysis layout. */
+.viewer.full {
+  position: fixed; inset: 0; z-index: 100;
+  height: auto; border: none; border-radius: 0;
 }
-.view-reset:hover { color: var(--text); border-color: #38405a; }
+
+/* ---------- exploded view ---------- */
+
+/* The stage caption and the separation panel stack up from the bottom edge,
+   centred under the model the way a plate is captioned. */
+.viewer-bottom {
+  position: absolute; left: 0; right: 0; bottom: 12px; z-index: 5;
+  display: flex; flex-direction: column; align-items: center; gap: 10px;
+  padding: 0 12px; pointer-events: none;
+}
+.viewer-bottom > * { pointer-events: auto; }
+
+.explode-stage {
+  display: flex; align-items: center; gap: 12px;
+  font-size: 10px; letter-spacing: .17em; text-transform: uppercase;
+  color: var(--dim); pointer-events: none;
+}
+.explode-stage::before, .explode-stage::after {
+  content: ''; width: 34px; height: 1px; background: var(--line);
+}
 
 .explode-panel {
-  position: absolute; right: 10px; bottom: 10px; width: 232px;
-  padding: 10px 12px 9px; border-radius: 10px;
+  display: flex; align-items: stretch; gap: 14px;
+  width: min(430px, 100%);
+  padding: 12px 14px; border-radius: 14px;
   background: rgba(18, 21, 29, .88); border: 1px solid var(--line);
-  backdrop-filter: blur(6px);
+  backdrop-filter: blur(8px);
+  box-shadow: 0 14px 34px rgba(0, 0, 0, .45);
 }
+.explode-main { flex: 1; min-width: 0; }
 .explode-head {
-  display: flex; align-items: baseline; justify-content: space-between; gap: 8px;
-  font-size: 12px; color: var(--text); margin-bottom: 7px;
+  display: flex; align-items: center; justify-content: space-between; gap: 10px;
+  font-size: 13px; font-weight: 550; color: var(--text); margin-bottom: 9px;
 }
-.explode-head span:last-child { color: var(--dim); font-size: 11px; }
-.explode-panel input[type='range'] { width: 100%; display: block; }
+.explode-pct {
+  padding: 2px 9px; border-radius: 7px;
+  background: var(--panel-2); border: 1px solid var(--line);
+  font-size: 12px; font-weight: 550; font-variant-numeric: tabular-nums;
+}
+.explode-pct i { font-style: normal; color: var(--dim); margin-left: 2px; }
+.explode-panel input[type='range'] { width: 100%; display: block; accent-color: var(--accent); }
 .explode-panel input[type='range']:disabled { opacity: .4; }
 .explode-foot {
   display: flex; justify-content: space-between; gap: 6px;
-  margin-top: 3px; font-size: 10px; color: var(--dim);
+  margin-top: 5px; font-size: 10px; color: var(--dim);
 }
-.explode-foot span:nth-child(2) { color: var(--accent); font-variant-numeric: tabular-nums; }
-.explode-note { margin-top: 5px; font-size: 11px; color: var(--dim); line-height: 1.45; }
+.explode-note { margin-top: 6px; font-size: 11px; color: var(--dim); line-height: 1.45; }
 .explode-names {
   display: flex; align-items: center; gap: 6px;
   margin-top: 8px; font-size: 11px; color: var(--muted); cursor: pointer;
 }
 .explode-names input { accent-color: var(--accent); margin: 0; }
+
+.explode-reset {
+  flex: none; display: flex; flex-direction: column;
+  align-items: center; justify-content: center; gap: 4px;
+  padding: 0 2px 0 14px; border: none; border-left: 1px solid var(--line);
+  background: none; color: var(--muted); font-size: 11px;
+  transition: color .12s;
+}
+.explode-reset:hover:not(:disabled) { color: var(--text); }
+.explode-reset:disabled { opacity: .35; }
 
 .part-label {
   padding: 2px 7px; border-radius: 999px; white-space: nowrap;
