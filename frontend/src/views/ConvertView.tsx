@@ -1,7 +1,7 @@
 import { lazy, Suspense, useCallback, useMemo, useState } from 'react'
 import {
-  DEFAULT_OPTIONS, downloadUrl, formatBytes, formatCount, previewUrl,
-  type Capabilities, type ConvertOptions, type Health, type Job,
+  DEFAULT_OPTIONS, downloadUrl, formatBytes, formatCount, formatPixels, previewUrl,
+  type Capabilities, type ConvertOptions, type Handoff, type Health, type Job,
 } from '../api'
 import Dropzone from '../components/Dropzone'
 import OptionsPanel from '../components/OptionsPanel'
@@ -18,10 +18,50 @@ const GROUPS: { label: string; exts: string[] }[] = [
   { label: 'USD variants', exts: ['.usdc', '.usda', '.usd'] },
 ]
 
-export default function ConvertView({ health, caps, active }: {
+/**
+ * One figure, with what it was before the conversion when that is worth saying.
+ *
+ * The delta is only shown when it actually moved: on a conversion with no
+ * reduction asked for, every row would otherwise read "0%" and the eye would
+ * have to check each one to find that nothing happened.
+ */
+function Stat({ k, was, now, bytes, px }: {
+  k: string
+  was: number | null | undefined
+  now: number | null | undefined
+  bytes?: boolean
+  px?: boolean
+}) {
+  const fmt = (n: number | null | undefined) =>
+    bytes ? formatBytes(n) : px ? formatPixels(n) : formatCount(n)
+  // A gain is a negative saving, and worth showing as one: USD carries geometry
+  // uncompressed, so a GLB converted to USDZ legitimately comes out larger.
+  const cut = was != null && now != null && was > 0 && now !== was
+    ? Math.round((1 - now / was) * 100)
+    : null
+
+  return (
+    <div className="stat">
+      <div className="k">{k}</div>
+      <div className="v">{fmt(now)}</div>
+      {cut != null && (
+        <div className="was">
+          {fmt(was)}
+          <span className={cut > 0 ? 'cut' : 'grew'}>
+            {cut > 0 ? `−${cut}%` : `+${Math.abs(cut)}%`}
+          </span>
+        </div>
+      )}
+    </div>
+  )
+}
+
+export default function ConvertView({ health, caps, active, onAnalyse }: {
   health: Health | null
   caps: Capabilities | null
   active: boolean
+  /** Send the finished conversion to the Analysis tab, which opens it. */
+  onAnalyse: (handoff: Handoff) => void
 }) {
   const [file, setFile] = useState<File | null>(null)
   const [target, setTarget] = useState('.glb')
@@ -54,7 +94,7 @@ export default function ConvertView({ health, caps, active }: {
 
   const isCadInput = categoryOf(sourceExt) === 'cad'
   const isArchiveInput = categoryOf(sourceExt) === 'archive'
-  const canConvert = !!file && !!health?.ok && !busy && sourceExt !== target
+  const canConvert = !!file && !!health?.ok && !busy
 
   const convert = (entryOverride?: string) => {
     if (!file) return
@@ -63,6 +103,7 @@ export default function ConvertView({ health, caps, active }: {
 
   const targetFmt = outputs.get(target)
   const stats = job?.resultStats ?? null
+  const before = job?.sourceStats ?? null
   const preview = job?.status === 'done' && job.hasPreview ? previewUrl(job.id) : null
 
   return (
@@ -106,13 +147,11 @@ export default function ConvertView({ health, caps, active }: {
                   <div className="fmt-grid">
                     {items.map((ext) => {
                       const f = outputs.get(ext)!
-                      const same = ext === sourceExt
                       return (
                         <button
                           key={ext}
                           className={`fmt${target === ext ? ' sel' : ''}`}
-                          disabled={same}
-                          title={same ? 'Source is already this format' : f.note || f.label}
+                          title={f.note || f.label}
                           onClick={() => setTarget(ext)}
                         >
                           <div className="e">{ext.slice(1).toUpperCase()}</div>
@@ -135,6 +174,7 @@ export default function ConvertView({ health, caps, active }: {
               onChange={setOptions}
               targetExt={target}
               isCadInput={isCadInput}
+              sourceTriangles={job?.sourceStats?.triangles ?? null}
             />
           </div>
         </section>
@@ -145,9 +185,9 @@ export default function ConvertView({ health, caps, active }: {
           {uploading
             ? `Uploading ${uploadPct}%`
             : busy
-              ? 'Converting…'
+              ? 'Working…'
               : sourceExt && sourceExt === target
-                ? 'Pick a different target format'
+                ? `Compress ${target.slice(1).toUpperCase()}`
                 : `Convert to ${target.slice(1).toUpperCase()}`}
         </button>
       </div>
@@ -185,11 +225,11 @@ export default function ConvertView({ health, caps, active }: {
           {job?.status === 'done' && (
             <>
               <div className="stats">
-                <div className="stat"><div className="k">Triangles</div><div className="v">{formatCount(stats?.triangles)}</div></div>
-                <div className="stat"><div className="k">Vertices</div><div className="v">{formatCount(stats?.vertices)}</div></div>
-                <div className="stat"><div className="k">Meshes</div><div className="v">{formatCount(stats?.meshes)}</div></div>
-                <div className="stat"><div className="k">Materials</div><div className="v">{formatCount(stats?.materials)}</div></div>
-                <div className="stat"><div className="k">Size</div><div className="v">{formatBytes(job.outputSize)}</div></div>
+                <Stat k="Triangles" was={before?.triangles} now={stats?.triangles} />
+                <Stat k="Vertices" was={before?.vertices} now={stats?.vertices} />
+                <Stat k="Meshes" was={before?.meshes} now={stats?.meshes} />
+                <Stat k="Textures" was={before?.texturePixels} now={stats?.texturePixels} px />
+                <Stat k="Size" was={job.sourceSize} now={job.outputSize} bytes />
               </div>
               <div className="card-body">
                 {stats?.dimensions && (
@@ -221,9 +261,23 @@ export default function ConvertView({ health, caps, active }: {
                   </div>
                 )}
                 {job.warnings.map((w, i) => <div className="warn-box" key={i} style={{ marginBottom: 8 }}>{w}</div>)}
-                <a className="dl" href={downloadUrl(job.id)} download>
-                  Download {job.downloadName}
-                </a>
+                <div className="done-actions">
+                  <a className="dl" href={downloadUrl(job.id)} download>
+                    Download {job.downloadName}
+                  </a>
+                  <button
+                    className="dl alt"
+                    onClick={() => onAnalyse({
+                      jobId: job.id,
+                      name: job.downloadName ?? job.filename,
+                      // The same options, so what Analysis opens is the model
+                      // as it was just reduced -- not the untouched original.
+                      options: { ...options, archive_entry: job.archiveEntry ?? '' },
+                    })}
+                  >
+                    Take apart in Analysis
+                  </button>
+                </div>
               </div>
             </>
           )}

@@ -224,6 +224,7 @@ def convert(
         "output": str(primary),
         "output_ext": target_ext,
         "preview": str(preview),
+        "work": str(work),
         "texture_root": str(texture_root) if texture_root else None,
         "options": options,
     }

@@ -811,8 +811,8 @@ curl -F file=@part.stp -F target=.usdz \
 ```
 
 Conversion options: `scale`, `center` (`none`/`origin`/`floor`), `decimate`,
-`triangulate`, `apply_modifiers`, `animations`, `draco` (GLB), `y_up`
-(USD/USDZ), `cad_tolerance` (STEP/IGES), `archive_entry` to pick a specific
+`triangulate`, `apply_modifiers`, `animations`, `draco` and `draco_level` 0-10
+(GLB), `y_up` (USD/USDZ), `cad_tolerance` (STEP/IGES), `archive_entry` to pick a specific
 model inside an archive, `renames` — a `{"old": "new"}` map of part names —
 `edits`, a map of part name to `{"move": [x, y, z], "rotate": [x, y, z], "scale":
 [x, y, z], "material": "metal", "color": "#ff2200", "opacity": 0.5,
@@ -824,6 +824,27 @@ own values when left out. `bundle` with
 import and export. Every edit field is a delta on the part's own local transform
 in the viewer's glTF-style Y-up axes, not Blender's Z-up; rotations are in
 degrees and scale is a multiplier per axis.
+
+Compression options, all off by default:
+
+| Option | Effect |
+| --- | --- |
+| `tri_budget` | A total triangle count to hit. Takes precedence over `decimate`: meshes of 64 triangles or fewer are left alone and the rest share one decimate ratio, so the reduction comes out of the parts that hold the triangles. |
+| `texture_limit` | Longest edge a texture may keep, in pixels. `0` leaves images alone. |
+| `texture_format` | `auto` (keep), `jpeg`, or `webp`. Images feeding an alpha socket or a Normal Map node keep their original format — JPEG has no alpha channel, and its blocking facets a normal map's gradients. The resolution cap still applies to them. |
+| `texture_quality` | 1-100, used when re-encoding. |
+| `merge` | `none`, `material` (one mesh per material), or `all`. Cuts mesh and draw-call count but loses the per-part names, so it is skipped with a warning on a model that carries `clips`. |
+| `weld` | Merge-by-distance threshold in model units. `0` is off. |
+| `clean` | Drop unused material slots and loose vertices/edges. Mostly a no-op on ordinary uploads — Blender's glTF, OBJ and STL importers already discard unreferenced vertices and materials — so it earns its keep on `.blend` input, which preserves whatever its author left in it. |
+
+Textures are resized and re-encoded to files under the job's `work/_tex/`, then
+the image datablocks are repointed at them. This matters because the OBJ, FBX
+and USD exporters copy the image *file* rather than re-encoding it, so scaling
+only in memory would export at the original resolution for those three.
+
+`resultStats` and `sourceStats` both carry `images` and `texturePixels`
+alongside the geometry counts, and the job reports `sourceSize` next to
+`outputSize`, which is what the UI's before/after column is drawn from.
 
 `clips` is a list of animations to key into the file, each `{"name": "Spin",
 "duration": 3, "tracks": [...]}` where a track is `{"target": "Wheel", "keys":

@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 import {
   getCapabilities, getHealth, getSettings,
-  type Capabilities, type Health, type NamerSettings,
+  type Capabilities, type Handoff, type Health, type NamerSettings,
 } from './api'
 import ConvertView from './views/ConvertView'
 import AnalysisView from './views/AnalysisView'
@@ -21,6 +21,9 @@ export default function App() {
   const [settings, setSettings] = useState<NamerSettings | null>(null)
   const [bootError, setBootError] = useState<string | null>(null)
   const tab = useRoute()
+  // A conversion sent over from the Convert tab, cleared once Analysis has
+  // picked it up so that switching tabs later does not re-run it.
+  const [handoff, setHandoff] = useState<Handoff | null>(null)
 
   useEffect(() => {
     Promise.all([getHealth(), getCapabilities()])
@@ -83,7 +86,12 @@ export default function App() {
       {/* Both tabs stay mounted so a running job -- and its result -- survives a
           switch; the hidden one parks its render loop rather than burning GPU. */}
       <div className="view" hidden={tab !== 'convert'}>
-        <ConvertView health={health} caps={caps} active={tab === 'convert'} />
+        <ConvertView
+          health={health}
+          caps={caps}
+          active={tab === 'convert'}
+          onAnalyse={(h) => { setHandoff(h); navigate('analysis') }}
+        />
       </div>
       <div className="view" hidden={tab !== 'analysis'}>
         <AnalysisView
@@ -92,6 +100,8 @@ export default function App() {
           active={tab === 'analysis'}
           settings={settings}
           onOpenSettings={() => navigate('settings')}
+          incoming={handoff}
+          onIncomingTaken={() => setHandoff(null)}
         />
       </div>
       <div className="view" hidden={tab !== 'settings'}>

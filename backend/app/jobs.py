@@ -38,6 +38,7 @@ class Job:
     finished_at: float | None = None
     download_name: str | None = None
     output_size: int | None = None
+    source_size: int | None = None
     source_stats: dict | None = None
     result_stats: dict | None = None
     archive_entries: list[str] = field(default_factory=list)
@@ -60,6 +61,7 @@ class Job:
             "finishedAt": self.finished_at,
             "downloadName": self.download_name,
             "outputSize": self.output_size,
+            "sourceSize": self.source_size,
             "sourceStats": self.source_stats,
             "resultStats": self.result_stats,
             "archiveEntries": self.archive_entries,
@@ -125,6 +127,7 @@ class JobStore:
             source_ext=Path(filename).suffix.lower(),
             target_ext=target_ext,
             options=options,
+            source_size=source.stat().st_size if source.exists() else None,
         )
         with self._lock:
             self._jobs[job_id] = job

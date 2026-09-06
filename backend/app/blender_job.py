@@ -71,6 +71,11 @@ def _export_gltf(path, o, binary=True):
     if binary and o.get("draco"):
         kw["export_draco_mesh_compression_enable"] = True
         kw["export_draco_mesh_compression_level"] = int(o.get("draco_level", 6))
+    # The images on disk are already at the size and quality asked for, so the
+    # exporter is told the format only -- naming WEBP is what makes it declare
+    # EXT_texture_webp instead of quietly re-encoding back to PNG.
+    if o.get("texture_format") == "webp":
+        kw["export_image_format"] = "WEBP"
     bpy.ops.export_scene.gltf(
         filepath=path,
         export_format="GLB" if binary else "GLTF_SEPARATE",
@@ -175,23 +180,34 @@ def world_bounds():
     return lo, hi
 
 
-def scene_stats():
+def scene_stats(evaluated=True):
+    """Count what the scene holds.
+
+    ``evaluated`` must match what the exporter is about to do. Simplify, the
+    triangle budget, merge-by-distance and triangulate are all *modifiers*, so
+    with "apply modifiers" off none of them reach the file -- and counting the
+    evaluated mesh would report a reduction the download does not have.
+    """
     verts = 0
     tris = 0
-    dg = bpy.context.evaluated_depsgraph_get()
+    dg = bpy.context.evaluated_depsgraph_get() if evaluated else None
     for ob in bpy.data.objects:
         if ob.type != "MESH":
             continue
-        try:
-            ev = ob.evaluated_get(dg)
-            me = ev.to_mesh()
-        except Exception:
-            continue
-        if me is None:
-            continue
+        if evaluated:
+            try:
+                ev = ob.evaluated_get(dg)
+                me = ev.to_mesh()
+            except Exception:
+                continue
+            if me is None:
+                continue
+        else:
+            ev, me = None, ob.data
         verts += len(me.vertices)
         tris += sum(max(len(p.vertices) - 2, 0) for p in me.polygons)
-        ev.to_mesh_clear()
+        if ev is not None:
+            ev.to_mesh_clear()
     lo, hi = world_bounds()
     return {
         "objects": len(bpy.data.objects),
@@ -200,6 +216,9 @@ def scene_stats():
         "vertices": verts,
         "triangles": tris,
         "dimensions": [round(hi[i] - lo[i], 6) for i in range(3)] if lo else None,
+        "images": len(bpy.data.images),
+        # Texture area, which is what a resolution cap actually trades away.
+        "texturePixels": sum(im.size[0] * im.size[1] for im in bpy.data.images),
     }
 
 
@@ -903,6 +922,265 @@ def apply_decimate(ratio):
             m.ratio = ratio
 
 
+# --- compression -------------------------------------------------------------
+# A mesh below this many triangles is left alone by the triangle budget. A flat
+# percentage is brutal to small parts: 30% of a 200-triangle bolt is a lump,
+# while the same 30% barely touches a 500k-triangle body. Protecting the small
+# ones and taking the reduction out of the large ones spends the budget where
+# the triangles actually are.
+BUDGET_FLOOR = 64
+
+
+def triangle_counts():
+    """Evaluated triangle count per mesh object, so modifiers already set count."""
+    counts = {}
+    dg = bpy.context.evaluated_depsgraph_get()
+    for ob in bpy.data.objects:
+        if ob.type != "MESH":
+            continue
+        try:
+            ev = ob.evaluated_get(dg)
+            me = ev.to_mesh()
+        except Exception:
+            continue
+        if me is None:
+            continue
+        counts[ob.name] = sum(max(len(p.vertices) - 2, 0) for p in me.polygons)
+        ev.to_mesh_clear()
+    return counts
+
+
+def apply_tri_budget(budget):
+    """Decimate towards a total triangle count rather than a blind percentage.
+
+    Returns ``(ratio, touched, before)``. The result is approximate: the
+    Decimate modifier's ratio is over faces and collapsing is topology-bound,
+    so a mesh can land somewhat above its share.
+    """
+    counts = triangle_counts()
+    total = sum(counts.values())
+    if not total or total <= budget:
+        return None, 0, total
+
+    protected = sum(t for t in counts.values() if t <= BUDGET_FLOOR)
+    reducible = total - protected
+    room = budget - protected
+    if reducible <= 0:
+        return None, 0, total
+    # Everything large shares one ratio, which keeps their relative detail.
+    ratio = min(1.0, max(0.01, room / reducible))
+
+    touched = 0
+    for ob in bpy.data.objects:
+        if ob.type != "MESH" or counts.get(ob.name, 0) <= BUDGET_FLOOR:
+            continue
+        m = ob.modifiers.new("cv_budget", "DECIMATE")
+        m.ratio = ratio
+        touched += 1
+    return ratio, touched, total
+
+
+def apply_weld(threshold):
+    """Merge vertices closer together than ``threshold`` model units."""
+    if threshold <= 0:
+        return 0
+    welded = 0
+    for ob in bpy.data.objects:
+        if ob.type == "MESH" and ob.data.vertices:
+            m = ob.modifiers.new("cv_weld", "WELD")
+            m.mode = "ALL"
+            m.merge_threshold = threshold
+            welded += 1
+    return welded
+
+
+def apply_clean():
+    """Drop unused material slots and loose geometry.
+
+    Both are safe: a slot no face points at contributes nothing, and a vertex
+    or edge belonging to no face is invisible in every renderer while still
+    costing bytes in the file.
+    """
+    slots = 0
+    loose = 0
+    for ob in list(bpy.data.objects):
+        if ob.type != "MESH":
+            continue
+        me = ob.data
+
+        used = {p.material_index for p in me.polygons}
+        # Walk high-to-low so removing one slot cannot shift the next index.
+        for i in range(len(ob.material_slots) - 1, -1, -1):
+            if i in used or len(ob.material_slots) <= 1:
+                continue
+            ob.active_material_index = i
+            try:
+                with bpy.context.temp_override(object=ob):
+                    bpy.ops.object.material_slot_remove()
+                slots += 1
+            except Exception:
+                pass
+
+        # delete_loose works over the whole mesh, so no selection is needed.
+        # Only meshes that have faces: for a point cloud or a curve-turned-edge
+        # loop, every vertex is "loose" and deleting them empties the object.
+        if not me.polygons:
+            continue
+        before = len(me.vertices) + len(me.edges)
+        try:
+            with bpy.context.temp_override(object=ob, active_object=ob,
+                                           selected_objects=[ob],
+                                           selected_editable_objects=[ob]):
+                bpy.ops.object.mode_set(mode="EDIT")
+                bpy.ops.mesh.delete_loose(use_verts=True, use_edges=True,
+                                          use_faces=False)
+                bpy.ops.object.mode_set(mode="OBJECT")
+        except Exception:
+            if ob.mode != "OBJECT":
+                try:
+                    bpy.ops.object.mode_set(mode="OBJECT")
+                except Exception:
+                    pass
+        loose += max(0, before - (len(me.vertices) + len(me.edges)))
+    return slots, loose
+
+
+def apply_merge(mode):
+    """Join mesh objects together, cutting mesh and draw-call count.
+
+    ``material`` joins the meshes that share a single material into one object
+    each -- the shape that batches well while still splitting by look.
+    ``all`` collapses everything into one mesh. Either way the individual part
+    names are gone, which is why the caller refuses to do this to a model that
+    carries animation.
+    """
+    meshes = [ob for ob in bpy.data.objects if ob.type == "MESH"]
+    if mode == "none" or len(meshes) < 2:
+        return 0, len(meshes)
+    before = len(meshes)
+
+    if mode == "all":
+        groups = [meshes]
+    else:
+        by_mat = {}
+        for ob in meshes:
+            names = tuple(sorted(
+                s.material.name for s in ob.material_slots if s.material))
+            by_mat.setdefault(names, []).append(ob)
+        groups = list(by_mat.values())
+
+    for group in groups:
+        if len(group) < 2:
+            continue
+        # Join writes into the active object, so it has to be one of the group
+        # and every member has to be selected.
+        bpy.ops.object.select_all(action="DESELECT")
+        for ob in group:
+            ob.select_set(True)
+        bpy.context.view_layer.objects.active = group[0]
+        try:
+            bpy.ops.object.join()
+        except Exception as exc:
+            emit("warn", message="could not join " + str(len(group))
+                 + " mesh(es): " + str(exc))
+    bpy.ops.object.select_all(action="DESELECT")
+    return before, len([ob for ob in bpy.data.objects if ob.type == "MESH"])
+
+
+def _image_roles():
+    """Which images feed an Alpha socket or a Normal Map node.
+
+    Lossy re-encoding ruins both: a JPEG alpha channel does not exist at all,
+    and JPEG's chroma blocking turns a normal map's smooth gradients into
+    faceted shading. The resolution cap still applies to them.
+    """
+    alpha = set()
+    normal = set()
+    for mat in bpy.data.materials:
+        tree = mat.node_tree
+        if not tree:
+            continue
+        for node in tree.nodes:
+            if node.bl_idname != "ShaderNodeTexImage" or not node.image:
+                continue
+            name = node.image.name
+            for out in node.outputs:
+                if out.name == "Alpha" and out.is_linked:
+                    alpha.add(name)
+            for out in node.outputs:
+                if out.name != "Color" or not out.is_linked:
+                    continue
+                for link in out.links:
+                    if link.to_node.bl_idname == "ShaderNodeNormalMap":
+                        normal.add(name)
+    return alpha, normal
+
+
+_IMAGE_EXT = {"PNG": ".png", "JPEG": ".jpg", "WEBP": ".webp"}
+
+
+def compress_textures(limit, fmt, quality, tex_dir):
+    """Cap texture resolution and optionally re-encode, then repoint the images.
+
+    Scaling in memory is not enough on its own: the OBJ, FBX and USD exporters
+    copy the image *file* rather than re-encoding it, so a scaled image would
+    export at its original size. Writing the scaled pixels to ``tex_dir`` and
+    pointing the datablock there makes every exporter carry the smaller file.
+    """
+    if limit <= 0 and fmt == "auto":
+        return 0, 0, 0
+
+    alpha, normal = _image_roles()
+    os.makedirs(tex_dir, exist_ok=True)
+    scaled = 0
+    recoded = 0
+    skipped = 0
+
+    for im in list(bpy.data.images):
+        w, h = im.size
+        if not w or not h or im.type != "IMAGE":
+            continue
+
+        want_scale = limit > 0 and max(w, h) > limit
+        # Alpha and normal maps keep whatever they were authored as.
+        lossy_ok = im.name not in alpha and im.name not in normal
+        want_recode = fmt != "auto" and lossy_ok
+        # Counted whether or not the image is resized as well, so the tally
+        # means "images a re-encode was not applied to" and does not drift
+        # with an unrelated change to the resolution cap.
+        if fmt != "auto" and not lossy_ok:
+            skipped += 1
+        if not want_scale and not want_recode:
+            continue
+
+        target_fmt = {"jpeg": "JPEG", "webp": "WEBP"}.get(fmt) if want_recode else None
+        if target_fmt is None:
+            # Scaling only: keep a format Blender can write back losslessly.
+            target_fmt = im.file_format if im.file_format in _IMAGE_EXT else "PNG"
+
+        try:
+            if want_scale:
+                factor = float(limit) / max(w, h)
+                im.scale(max(1, int(round(w * factor))), max(1, int(round(h * factor))))
+                scaled += 1
+
+            safe = "".join(c if c.isalnum() or c in "-_." else "_" for c in im.name)
+            path = os.path.join(tex_dir, safe + _IMAGE_EXT[target_fmt])
+            if im.packed_file:
+                im.unpack(method="REMOVE")
+            im.file_format = target_fmt
+            im.filepath_raw = path
+            im.save(quality=quality)
+            # Reload so the datablock is backed by the file the exporter copies.
+            im.reload()
+            if want_recode:
+                recoded += 1
+        except Exception as exc:
+            emit("warn", message="could not compress texture '" + im.name
+                 + "': " + str(exc))
+    return scaled, recoded, skipped
+
+
 # --- main --------------------------------------------------------------------
 
 def main():
@@ -971,6 +1249,14 @@ def main():
     if renamed:
         emit("info", message="Renamed " + str(renamed) + " part(s)")
 
+    applies_modifiers = bool(o.get("apply_modifiers", True))
+    reductions = [name for name, on in (
+        ("Simplify", 0.0 < float(o.get("decimate", 1.0)) < 1.0),
+        ("the triangle budget", int(o.get("tri_budget", 0) or 0) > 0),
+        ("Merge vertices", float(o.get("weld", 0.0)) > 0),
+        ("Triangulate faces", bool(o.get("triangulate"))),
+    ) if on]
+
     emit("progress", pct=45, step="Transforming")
     apply_scale(float(o.get("scale", 1.0)))
     apply_center(o.get("center", "none"))
@@ -985,9 +1271,66 @@ def main():
             "'" + n + "'" for n in unmoved[:5]) + (
             " (and " + str(len(unmoved) - 5) + " more)" if len(unmoved) > 5 else "")
             + " -- those parts were not animated")
+    emit("progress", pct=52, step="Reducing")
+    if not applies_modifiers and reductions:
+        # Every one of these is a modifier, and the exporters are being told
+        # not to apply modifiers -- so they would be silently dropped.
+        emit("warn", message="'Apply modifiers' is off, so "
+             + ", ".join(reductions) + " could not be written into the file. "
+             "Turn it on to keep the reduction.")
+
+    if o.get("clean"):
+        slots, loose = apply_clean()
+        if slots or loose:
+            emit("info", message="Cleaned " + str(slots) + " unused material slot(s) and "
+                 + str(loose) + " loose vert/edge(s)")
+
+    welded = apply_weld(float(o.get("weld", 0.0)))
+    if welded:
+        emit("info", message="Merged vertices within "
+             + str(o.get("weld")) + " on " + str(welded) + " mesh(es)")
+
+    merge = o.get("merge", "none")
+    if merge != "none" and o.get("clips"):
+        # Animation lives on objects; joining them would keep only one object's
+        # action and silently drop the rest of the clip.
+        emit("warn", message="Meshes were not merged: the model carries animation, "
+                             "which is held per part and would be lost in the join")
+    elif merge != "none":
+        before, after = apply_merge(merge)
+        if before and before != after:
+            emit("info", message="Merged " + str(before) + " mesh(es) into " + str(after))
+
     if o.get("triangulate"):
         apply_triangulate()
-    apply_decimate(float(o.get("decimate", 1.0)))
+
+    budget = int(o.get("tri_budget", 0) or 0)
+    if budget > 0:
+        # A budget is a target, so it stands in for the flat percentage.
+        ratio, touched, total = apply_tri_budget(budget)
+        if ratio is None:
+            emit("info", message="Already within the " + str(budget)
+                 + "-triangle budget (" + str(total) + ")")
+        else:
+            emit("info", message="Budget " + str(budget) + " of " + str(total)
+                 + " triangles: decimating " + str(touched) + " mesh(es) to "
+                 + str(round(ratio * 100, 1)) + "%")
+    else:
+        apply_decimate(float(o.get("decimate", 1.0)))
+
+    tex_limit = int(o.get("texture_limit", 0) or 0)
+    tex_format = o.get("texture_format", "auto")
+    if bpy.data.images and (tex_limit > 0 or tex_format != "auto"):
+        emit("progress", pct=56, step="Compressing textures")
+        scaled, recoded, skipped = compress_textures(
+            tex_limit, tex_format, int(o.get("texture_quality", 85)),
+            os.path.join(cfg["work"], "_tex"))
+        if scaled or recoded:
+            emit("info", message="Textures: " + str(scaled) + " resized, "
+                 + str(recoded) + " re-encoded to " + tex_format.upper())
+        if skipped:
+            emit("info", message=str(skipped) + " texture(s) kept their format: "
+                                 "alpha and normal maps do not survive lossy encoding")
 
     emit("progress", pct=60, step="Exporting " + dst_ext)
     os.makedirs(os.path.dirname(dst), exist_ok=True)
@@ -1003,7 +1346,9 @@ def main():
         except Exception as exc:  # preview is best-effort, never fatal
             emit("warn", message="preview export failed: " + str(exc))
 
-    emit("stats", result=scene_stats())
+    # Counted the way the exporter wrote it, so the before/after the user
+    # sees is the file they are about to download.
+    emit("stats", result=scene_stats(evaluated=applies_modifiers))
     emit("progress", pct=100, step="Done")
     emit("done", output=dst)
 

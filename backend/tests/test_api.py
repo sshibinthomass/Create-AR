@@ -994,6 +994,281 @@ def test_reexport_can_change_format_at_the_same_time():
     assert again["downloadName"].endswith(".usdz"), again["downloadName"]
 
 
+# --- compression -------------------------------------------------------------
+
+def _png(side: int) -> bytes:
+    """A valid ``side``x``side`` RGB PNG, so a resolution cap has room to bite."""
+    import zlib
+
+    rows = b"".join(
+        b"\x00" + bytes(((x * 7) % 256, (y * 11) % 256, 128)[c]
+                        for x in range(side) for c in range(3))
+        for y in range(side)
+    )
+
+    def chunk(tag: bytes, payload: bytes) -> bytes:
+        return (struct.pack(">I", len(payload)) + tag + payload
+                + struct.pack(">I", zlib.crc32(tag + payload) & 0xFFFFFFFF))
+
+    return (b"\x89PNG\r\n\x1a\n"
+            + chunk(b"IHDR", struct.pack(">IIBBBBB", side, side, 8, 2, 0, 0, 0))
+            + chunk(b"IDAT", zlib.compress(rows))
+            + chunk(b"IEND", b""))
+
+
+def _textured_obj_zip(side: int) -> bytes:
+    """A zipped OBJ whose one material points at a ``side``x``side`` texture."""
+    obj = (b"mtllib m.mtl\nusemtl T\n"
+           b"v 0 0 0\nv 1 0 0\nv 1 1 0\nvt 0 0\nvt 1 0\nvt 1 1\nf 1/1 2/2 3/3\n")
+    mtl = b"newmtl T\nKd 1 1 1\nmap_Kd albedo.png\n"
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        zf.writestr("thing.obj", obj)
+        zf.writestr("m.mtl", mtl)
+        zf.writestr("albedo.png", _png(side))
+    return buf.getvalue()
+
+
+def _dense_stl(rows: int) -> bytes:
+    """A binary STL grid of ``rows * rows * 2`` triangles.
+
+    The triangle budget deliberately leaves meshes of 64 triangles or fewer
+    alone, so the 12-triangle cube fixture cannot exercise it.
+    """
+    tris: list[tuple] = []
+    for y in range(rows):
+        for x in range(rows):
+            a, b = (x, y, 0.0), (x + 1, y, 0.0)
+            c, d = (x + 1, y + 1, 0.0), (x, y + 1, 0.0)
+            tris.append((a, b, c))
+            tris.append((a, c, d))
+    out = b"\x00" * 80 + struct.pack("<I", len(tris))
+    for tri in tris:
+        out += struct.pack("<3f", 0.0, 0.0, 1.0)
+        for v in tri:
+            out += struct.pack("<3f", float(v[0]), float(v[1]), float(v[2]))
+        out += b"\x00\x00"
+    return out
+
+
+def _glb_image_sizes(payload: bytes) -> list[tuple[int, int]]:
+    """Pixel dimensions of every image embedded in a GLB."""
+    doc = glb_doc(payload)
+    json_len = struct.unpack_from("<I", payload, 12)[0]
+    body = 20 + json_len + 8
+    sizes = []
+    for image in doc.get("images", []):
+        view = doc["bufferViews"][image["bufferView"]]
+        start = body + view.get("byteOffset", 0)
+        blob = payload[start:start + view["byteLength"]]
+        if blob[:8] == b"\x89PNG\r\n\x1a\n":
+            sizes.append(struct.unpack(">II", blob[16:24]))
+        elif blob[:2] == b"\xff\xd8":
+            i = 2
+            while i < len(blob):
+                if blob[i] != 0xFF:
+                    i += 1
+                    continue
+                marker = blob[i + 1]
+                if marker in (0xC0, 0xC1, 0xC2, 0xC3):
+                    high, wide = struct.unpack(">HH", blob[i + 5:i + 9])
+                    sizes.append((wide, high))
+                    break
+                if marker in (0xD8, 0xD9) or 0xD0 <= marker <= 0xD7:
+                    i += 2
+                    continue
+                i += 2 + struct.unpack(">H", blob[i + 2:i + 4])[0]
+    return sizes
+
+
+@pytest.mark.parametrize("bad", [
+    {"texture_format": "avif"},
+    {"texture_limit": 99999},
+    {"texture_quality": 0},
+    {"merge": "everything"},
+    {"weld": -1},
+    {"tri_budget": -5},
+])
+def test_rejects_invalid_compression_options(bad):
+    r = client.post(
+        "/api/convert",
+        files={"file": ("cube.stl", CUBE_STL.read_bytes(), "model/stl")},
+        data={"target": ".glb", "options": json.dumps(bad)},
+    )
+    assert r.status_code == 400, r.text
+
+
+@needs_blender
+def test_triangle_budget_lands_at_or_under_the_target():
+    job = run_job("grid.stl", _dense_stl(20), ".glb", {"tri_budget": 200})
+    assert job["status"] == "done", job["error"]
+    assert job["sourceStats"]["triangles"] == 800
+    assert job["resultStats"]["triangles"] <= 200, job["resultStats"]
+
+
+@needs_blender
+def test_a_model_already_within_budget_is_left_alone():
+    job = run_job("cube.stl", CUBE_STL.read_bytes(), ".glb", {"tri_budget": 1_000_000})
+    assert job["status"] == "done", job["error"]
+    assert job["resultStats"]["triangles"] == job["sourceStats"]["triangles"]
+    assert any("Already within" in line for line in job["log"]), job["log"][-10:]
+
+
+@needs_blender
+def test_a_budget_overrides_the_percentage():
+    """Both knobs aim the same reduction, so sending both must not compound."""
+    job = run_job("grid.stl", _dense_stl(20), ".glb",
+                  {"tri_budget": 400, "decimate": 0.1})
+    assert job["status"] == "done", job["error"]
+    # 10% of 800 would be 80; the budget is what counts.
+    assert 200 <= job["resultStats"]["triangles"] <= 400, job["resultStats"]
+
+
+@needs_blender
+def test_merging_collapses_every_mesh_into_one():
+    job = run_job("many.glb", make_glb("A", "B", "C"), ".glb", {"merge": "all"})
+    assert job["status"] == "done", job["error"]
+    assert job["sourceStats"]["meshes"] == 3
+    assert job["resultStats"]["meshes"] == 1, job["resultStats"]
+
+
+@needs_blender
+def test_merging_is_refused_when_the_model_carries_animation():
+    """A join keeps one object's action, so it would silently eat the clips."""
+    clips = [{"name": "Open", "duration": 1.0, "tracks": [
+        {"target": "B", "keys": [{"time": 0.0}, {"time": 1.0, "move": [0.0, 1.0, 0.0]}]}]}]
+    job = run_job("many.glb", make_glb("A", "B", "C"), ".glb",
+                  {"merge": "all", "clips": clips})
+    assert job["status"] == "done", job["error"]
+    assert job["resultStats"]["meshes"] == 3, "meshes were merged despite the clips"
+    assert any("not merged" in w for w in job["warnings"]), job["warnings"]
+
+
+@needs_blender
+def test_texture_resolution_cap_shrinks_the_embedded_image():
+    job = run_job("tex.zip", _textured_obj_zip(64), ".glb", {"texture_limit": 16})
+    assert job["status"] == "done", job["error"]
+    assert job["sourceStats"]["texturePixels"] == 64 * 64
+    assert job["resultStats"]["texturePixels"] == 16 * 16, job["resultStats"]
+    payload = client.get(f"/api/jobs/{job['id']}/download").content
+    assert _glb_image_sizes(payload) == [(16, 16)], _glb_image_sizes(payload)
+
+
+@needs_blender
+def test_a_texture_already_under_the_cap_is_untouched():
+    job = run_job("tex.zip", _textured_obj_zip(8), ".glb", {"texture_limit": 64})
+    assert job["status"] == "done", job["error"]
+    assert job["resultStats"]["texturePixels"] == 8 * 8
+
+
+@needs_blender
+def test_textures_re_encode_to_jpeg_and_reach_a_copying_exporter():
+    """OBJ copies the texture file rather than re-encoding it, so the scaled and
+    re-encoded image has to be on disk for it -- not just live in Blender."""
+    job = run_job("tex.zip", _textured_obj_zip(64), ".obj",
+                  {"texture_limit": 32, "texture_format": "jpeg", "texture_quality": 50})
+    assert job["status"] == "done", job["error"]
+
+    payload = client.get(f"/api/jobs/{job['id']}/download").content
+    with zipfile.ZipFile(io.BytesIO(payload)) as zf:
+        jpegs = [n for n in zf.namelist() if n.lower().endswith(".jpg")]
+        assert jpegs, zf.namelist()
+        blob = zf.read(jpegs[0])
+    assert blob[:2] == b"\xff\xd8", "not a JPEG"
+    assert _jpeg_size(blob) == (32, 32), _jpeg_size(blob)
+
+
+def _jpeg_size(blob: bytes) -> tuple[int, int] | None:
+    i = 2
+    while i < len(blob):
+        if blob[i] != 0xFF:
+            i += 1
+            continue
+        marker = blob[i + 1]
+        if marker in (0xC0, 0xC1, 0xC2, 0xC3):
+            high, wide = struct.unpack(">HH", blob[i + 5:i + 9])
+            return (wide, high)
+        if marker in (0xD8, 0xD9) or 0xD0 <= marker <= 0xD7:
+            i += 2
+            continue
+        i += 2 + struct.unpack(">H", blob[i + 2:i + 4])[0]
+    return None
+
+
+@needs_blender
+def test_cleaning_and_welding_leave_a_convertible_model():
+    job = run_job("cube.stl", CUBE_STL.read_bytes(), ".glb",
+                  {"clean": True, "weld": 0.0001})
+    assert job["status"] == "done", job["error"]
+    assert job["resultStats"]["triangles"] == 12, job["resultStats"]
+
+
+@needs_blender
+def test_the_source_size_is_reported_for_comparison():
+    payload = CUBE_STL.read_bytes()
+    job = run_job("cube.stl", payload, ".glb")
+    assert job["status"] == "done", job["error"]
+    assert job["sourceSize"] == len(payload)
+
+
+def _glb_triangles(payload: bytes) -> int:
+    """Triangles the GLB actually carries, counted from its accessors."""
+    doc = glb_doc(payload)
+    total = 0
+    for mesh in doc["meshes"]:
+        for prim in mesh["primitives"]:
+            key = prim["indices"] if "indices" in prim else prim["attributes"]["POSITION"]
+            total += doc["accessors"][key]["count"] // 3
+    return total
+
+
+@needs_blender
+def test_reported_triangles_match_what_the_file_carries():
+    """Simplify is a modifier, so with 'apply modifiers' off it never reaches the
+    export. The stats have to say so rather than claim a reduction that only
+    happened in Blender's evaluated mesh."""
+    opts = {"decimate": 0.25, "apply_modifiers": False}
+    job = run_job("grid.stl", _dense_stl(20), ".glb", opts)
+    assert job["status"] == "done", job["error"]
+
+    payload = client.get(f"/api/jobs/{job['id']}/download").content
+    assert _glb_triangles(payload) == 800, "the modifier should not have been applied"
+    assert job["resultStats"]["triangles"] == 800, job["resultStats"]
+    assert any("Apply modifiers" in w for w in job["warnings"]), job["warnings"]
+
+
+@needs_blender
+def test_applying_modifiers_writes_the_reduction_into_the_file():
+    job = run_job("grid.stl", _dense_stl(20), ".glb",
+                  {"decimate": 0.25, "apply_modifiers": True})
+    assert job["status"] == "done", job["error"]
+    payload = client.get(f"/api/jobs/{job['id']}/download").content
+    assert _glb_triangles(payload) == job["resultStats"]["triangles"]
+    assert _glb_triangles(payload) < 800
+    assert not any("Apply modifiers" in w for w in job["warnings"]), job["warnings"]
+
+
+@needs_blender
+def test_same_format_in_and_out_is_a_compression_pass():
+    """GLB to GLB is not a no-op now that the options can shrink the model --
+    it is how you compress a file that is already in the format you want."""
+    payload = _textured_obj_zip(64)
+    first = run_job("tex.zip", payload, ".glb")
+    assert first["status"] == "done", first["error"]
+    glb = client.get(f"/api/jobs/{first['id']}/download").content
+    assert _glb_image_sizes(glb) == [(64, 64)]
+
+    again = run_job("thing.glb", glb, ".glb",
+                    {"texture_limit": 16, "texture_format": "jpeg"})
+    assert again["status"] == "done", again["error"]
+    assert again["sourceExt"] == ".glb" and again["targetExt"] == ".glb"
+    assert again["outputSize"] < first["outputSize"], (
+        first["outputSize"], again["outputSize"])
+
+    out = client.get(f"/api/jobs/{again['id']}/download").content
+    assert _glb_image_sizes(out) == [(16, 16)], _glb_image_sizes(out)
+
+
 # --- the SPA -----------------------------------------------------------------
 
 needs_ui_build = pytest.mark.skipif(

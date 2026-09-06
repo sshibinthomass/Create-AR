@@ -33,6 +33,9 @@ export interface Stats {
   vertices: number
   triangles: number
   dimensions: [number, number, number] | null
+  images: number
+  /** Total texture area. What a resolution cap actually trades away. */
+  texturePixels: number
 }
 
 /**
@@ -76,6 +79,8 @@ export interface Job {
   finishedAt: number | null
   downloadName: string | null
   outputSize: number | null
+  /** The upload's size on disk, for comparing against `outputSize`. */
+  sourceSize: number | null
   sourceStats: Stats | null
   resultStats: Stats | null
   archiveEntries: string[]
@@ -211,14 +216,41 @@ export const isEdited = (e: PartEdit | undefined): boolean =>
 /** Which gizmo, if any, is attached to the selected part in the viewer. */
 export type GizmoMode = 'translate' | 'rotate' | 'scale' | null
 
+/** How the triangle reduction is aimed: a flat percentage, or a total to hit. */
+export type ReduceMode = 'percent' | 'budget'
+
+/** `auto` keeps each image in the format it was authored in. */
+export type TextureFormat = 'auto' | 'jpeg' | 'webp'
+
+/** How meshes are joined together. `material` keeps one mesh per material. */
+export type MergeMode = 'none' | 'material' | 'all'
+
 export interface ConvertOptions {
   scale: number
   center: 'none' | 'origin' | 'floor'
   apply_modifiers: boolean
   triangulate: boolean
   decimate: number
+  /**
+   * A total triangle count to aim for. 0 leaves `decimate` in charge.
+   *
+   * Meshes at or under 64 triangles are left alone and the rest share one
+   * ratio, so the reduction comes out of the parts that actually hold the
+   * triangles instead of flattening every small bolt equally.
+   */
+  tri_budget: number
+  /** Longest edge a texture may keep, in pixels. 0 leaves images alone. */
+  texture_limit: number
+  texture_format: TextureFormat
+  texture_quality: number
+  merge: MergeMode
+  /** Merge-by-distance threshold, in model units. 0 is off. */
+  weld: number
+  /** Drop unused material slots and loose geometry. */
+  clean: boolean
   animations: boolean
   draco: boolean
+  draco_level: number
   y_up: boolean
   cad_tolerance: number
   /** Path inside an archive, when the auto-picked model is not the wanted one. */
@@ -236,14 +268,37 @@ export interface ConvertOptions {
   clips?: Clip[]
 }
 
+/**
+ * A finished conversion handed from the Convert tab to the Analysis tab.
+ *
+ * Carries the job rather than the produced file: the server still holds the
+ * original upload, so Analysis re-exports *that* to GLB with the same options
+ * instead of pushing a model back up the wire. The result is the model as it
+ * was just compressed, which is the one the user is looking at.
+ */
+export interface Handoff {
+  jobId: string
+  /** What to show in the Analysis source card. */
+  name: string
+  options: ConvertOptions
+}
+
 export const DEFAULT_OPTIONS: ConvertOptions = {
   scale: 1,
   center: 'none',
   apply_modifiers: true,
   triangulate: false,
   decimate: 1,
+  tri_budget: 0,
+  texture_limit: 0,
+  texture_format: 'auto',
+  texture_quality: 85,
+  merge: 'none',
+  weld: 0,
+  clean: false,
   animations: true,
   draco: false,
+  draco_level: 6,
   y_up: true,
   cad_tolerance: 0.01,
 }
@@ -338,6 +393,20 @@ const COUNT = new Intl.NumberFormat('en-US')
 
 export const formatCount = (n: number | null | undefined): string =>
   n == null ? '--' : COUNT.format(n)
+
+/**
+ * A texture area as megapixels.
+ *
+ * Raw pixel counts run to eight digits and say nothing to read at a glance;
+ * "19.8 MP" against "1.9 MP" is the comparison that matters.
+ */
+export function formatPixels(n: number | null | undefined): string {
+  if (n == null) return '--'
+  if (n === 0) return 'none'
+  const mp = n / 1_000_000
+  if (mp < 0.1) return `${Math.round(n / 1000)} kP`
+  return `${mp.toFixed(mp < 10 ? 1 : 0)} MP`
+}
 
 /* ---------- part naming ---------- */
 
