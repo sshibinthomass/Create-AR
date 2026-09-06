@@ -342,22 +342,24 @@ function PartLabels({ parts, names, selected, wrapper }: {
 }
 
 /**
- * A box drawn around the selected part.
+ * A box drawn around what is marked -- one part, or a group held as one thing.
  *
  * Depth testing is off so a part buried inside the assembly is still findable
  * when the model is only half separated. The box is measured only when the
- * selection, the separation or the part's own edit changes -- walking a heavy
- * part's geometry every frame would cost far more than it is worth.
+ * selection, the separation or the marked parts' own edits change -- walking a
+ * heavy part's geometry every frame would cost far more than it is worth.
  *
  * The measurement waits for a frame rather than taking one in the effect that
  * marks it stale. Parts are moved from an effect in the parent, and React runs
  * a child's effects first, so measuring there would size the box from the pose
  * the part held before the change that triggered it.
  */
-function SelectionBox({ part, separation, edit, wrapper, player }: {
-  part: Part
+function SelectionBox({ parts, separation, pose, wrapper, player }: {
+  /** Everything the box has to enclose. One box, however many are given. */
+  parts: Part[]
   separation: number
-  edit: PartEdit | undefined
+  /** A signature of the edits on those parts: what makes the box stale. */
+  pose: string
   wrapper: RefObject<Group | null>
   player: Player | null
 }) {
@@ -371,7 +373,7 @@ function SelectionBox({ part, separation, edit, wrapper, player }: {
   }, [])
 
   const stale = useRef(true)
-  useEffect(() => { stale.current = true }, [part, separation, edit])
+  useEffect(() => { stale.current = true }, [parts, separation, pose])
 
   // A playing clip moves the part every frame, so the box follows the clock
   // too -- but only when the clock has actually moved, for the reason above.
@@ -385,7 +387,8 @@ function SelectionBox({ part, separation, edit, wrapper, player }: {
     if (!stale.current || !root) return
     stale.current = false
     root.updateWorldMatrix(true, true)
-    helper.box.setFromObject(part.node)
+    helper.box.makeEmpty()
+    for (const p of parts) helper.box.union(new Box3().setFromObject(p.node))
     // Measured in world space, drawn as a child of the normalising wrapper.
     helper.box.applyMatrix4(new Matrix4().copy(root.matrixWorld).invert())
   })
@@ -564,7 +567,38 @@ function Model({
     [parts, marks, wholeModel, whole],
   )
   const gone = useMemo(() => new Set(hidden), [hidden])
-  const labelled = (showAllLabels ? parts : picked).filter((p) => !gone.has(p.name))
+  const living = useMemo(() => parts.filter((p) => !gone.has(p.name)), [parts, gone])
+
+  /**
+   * Whether the marks amount to the whole model rather than a pick out of it.
+   *
+   * Marking every part is how the model is moved as one, so that is how it is
+   * drawn: a single box round the lot. A box per part would outline the
+   * assembly's every piece, which says nothing you cannot already see and
+   * buries the model in blue.
+   */
+  const asOne = !wholeModel && picked.length > 1 && picked.length === living.length
+
+  /**
+   * The boxes to draw: one per marked part, or one for the lot.
+   *
+   * Grouped here rather than in the render so the array a box is handed keeps
+   * its identity between frames -- it is what tells the box its measurement is
+   * still good, and a fresh array every render would re-walk the geometry of
+   * every marked part on every frame.
+   */
+  const outlines = useMemo(
+    () => (asOne ? [picked] : picked.map((p) => [p])),
+    [asOne, picked],
+  )
+
+  /**
+   * Names float over the marked parts, so clicking a part tells you what it
+   * is. Not when the marks are the whole model, though: that is one thing
+   * held, not a set of parts being read, and a name apiece is exactly the
+   * clutter the checkbox below exists to ask for deliberately.
+   */
+  const labelled = showAllLabels ? living : asOne ? [] : picked.filter((p) => !gone.has(p.name))
 
   // The gizmo does not grab the part itself. A part's own origin is where the
   // exporter put it, and plenty of models leave every one of them on the world
@@ -679,10 +713,11 @@ function Model({
             wrapper={wrapper}
           />
         )}
-        {picked.map((p) => (
+        {outlines.map((group) => (
           <SelectionBox
-            key={p.name} part={p} separation={separation}
-            edit={edits[p.name]} wrapper={wrapper} player={clip ? player : null}
+            key={group[0].name} parts={group} separation={separation}
+            pose={group.map((p) => JSON.stringify(edits[p.name] ?? 0)).join('|')}
+            wrapper={wrapper} player={clip ? player : null}
           />
         ))}
       </group>
@@ -767,6 +802,18 @@ interface Props {
    * whole page, and anything left outside it is buried underneath.
    */
   children?: ReactNode
+  /** Whether every part that can be marked already is. See `onMarkAll`. */
+  allMarked?: boolean
+  /**
+   * Mark every part at once, or clear the marks.
+   *
+   * The way to move a model as one is to mark all of its parts and drag them
+   * together, and the only way to mark them was to shift-click down the parts
+   * list -- which is not on screen at all once the model fills the window, and
+   * is tedious long before that. Left out entirely where there is nothing to
+   * mark.
+   */
+  onMarkAll?: (on: boolean) => void
   /** Whether the animation dock is open. Only meaningful with `onAnimate`. */
   animate?: boolean
   /**
@@ -881,7 +928,7 @@ export default function ModelViewer({
   url, placeholder, explodeOpen = false, labels = NO_LABELS, edits = NO_EDITS,
   hidden = NO_HIDDEN, selected = NO_SELECTION, onSelect, onEdit, onParts,
   clip = null, player = null, wholeModel = false, active = true, children, dock = null,
-  animate = false, onAnimate,
+  animate = false, onAnimate, allMarked = false, onMarkAll,
 }: Props) {
   const [open, setOpen] = useState(explodeOpen)
   const [pct, setPct] = useState(explodeOpen ? RESTING_PCT : 0)
@@ -1054,6 +1101,22 @@ export default function ModelViewer({
             </svg>
             Reset view
           </button>
+
+          {onMarkAll && (
+            <button
+              className={`viewer-tool${allMarked ? ' on' : ''}`}
+              title={allMarked
+                ? 'Clear the marks'
+                : 'Mark every part, so a gizmo drag moves the model as one'}
+              onClick={() => onMarkAll(!allMarked)}
+            >
+              <svg width="14" height="14" viewBox="0 0 24 24" {...stroke}>
+                <path d="M3 8V4h4M21 8V4h-4M3 16v4h4M21 16v4h-4" />
+                <rect x="8.5" y="8.5" width="7" height="7" rx="1" />
+              </svg>
+              {allMarked ? 'All parts marked' : 'Select all'}
+            </button>
+          )}
 
           <button className={`viewer-tool${open ? ' on' : ''}`} onClick={toggle}>
             <svg width="14" height="14" viewBox="0 0 24 24" {...stroke}>

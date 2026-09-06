@@ -2,9 +2,11 @@ import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } fro
 import {
   DEFAULT_OPTIONS, downloadUrl, formatCount, isEdited, NO_EDIT, previewUrl, WHOLE,
   type Capabilities, type Clip, type Handoff, type Health, type NamerSettings,
-  type PartDetails, type PartEdit, type PartsDoc,
+  type PartDetails, type PartEdit, type PartsDoc, type Pose,
 } from '../api'
-import { copyClip, newClip, pruneClips, reverseClip, setKey, splitPose, unpivot } from '../animation'
+import {
+  copyClip, newClip, pruneClips, restAxes, reverseClip, setKey, splitPose, unpivot,
+} from '../animation'
 import type { PartSizes } from '../components/ModelViewer'
 import AgentAsk from '../components/AgentAsk'
 import AgentReport from '../components/AgentReport'
@@ -14,6 +16,7 @@ import PartDialog from '../components/PartDialog'
 import PartEditor from '../components/PartEditor'
 import PartPreview from '../components/PartPreview'
 import Timeline from '../components/Timeline'
+import TransformReadout, { ClipReadout } from '../components/TransformReadout'
 import { Player } from '../player'
 import { useAgent } from '../useAgent'
 import { useConversion } from '../useConversion'
@@ -242,6 +245,27 @@ export default function AnalysisView({
     })
   }, [selected, shared])
 
+  /**
+   * Undo a change on every marked part: one number, one channel, or the lot.
+   *
+   * Not routed through `applyToMarked`. That copies across only what differs
+   * from what the panel is showing, so putting an axis back to a value the
+   * panel already reads as the group's own -- which is exactly what an undo
+   * does where the parts disagree -- would be taken for no change at all.
+   */
+  const resetMarked = useCallback((key: keyof Pose | null, axis: number | null) => {
+    setEdits((all) => {
+      const copy = { ...all }
+      for (const name of selected) {
+        const own = copy[name]
+        if (!own) continue
+        if (key === null) delete copy[name]
+        else copy[name] = { ...own, [key]: restAxes(own, key, axis) }
+      }
+      return copy
+    })
+  }, [selected])
+
   /** Plain click replaces the marks; shift or ctrl/cmd adds to or drops from them. */
   const mark = useCallback((name: string | null, additive: boolean) => {
     // Picking a part is picking what to animate, too.
@@ -386,6 +410,28 @@ export default function AnalysisView({
   const animTargets = useMemo(
     () => (subject === 'model' ? [WHOLE] : selected.filter((n) => !gone.has(n))),
     [subject, selected, gone])
+
+  /**
+   * Mark every part still in the model, or clear the marks.
+   *
+   * Moving a model as one is marking all of its parts and dragging them
+   * together -- each keeps its own edit, so the save needs nothing new. The
+   * marks are what the animation subject follows, so this picks the parts
+   * rather than the model-as-one track, exactly as clicking a part does.
+   */
+  const markAll = useCallback((on: boolean) => {
+    setSubject('parts')
+    setSelected(on ? living : [])
+  }, [living])
+  const allMarked = !wholeModel && living.length > 0 && selected.length === living.length
+
+  // What the figures over the model are of: the parts a keyframe would land on
+  // while a clip is open, and the marked parts otherwise -- which is in both
+  // cases whatever a gizmo drag in the viewer would move.
+  const readTargets = clip ? animTargets : selected
+  const readTitle = readTargets.length === 1
+    ? labelOf(readTargets[0]) || 'Unnamed part'
+    : `${readTargets.length} parts`
 
   /**
    * A gizmo drag, read back from the viewer as one combined delta per part.
@@ -857,11 +903,7 @@ export default function AnalysisView({
                 value={shared}
                 extent={reach}
                 onChange={applyToMarked}
-                onReset={() => setEdits((all) => {
-                  const copy = { ...all }
-                  for (const name of selected) delete copy[name]
-                  return copy
-                })}
+                onReset={resetMarked}
               />
             )}
 
@@ -1120,6 +1162,9 @@ export default function AnalysisView({
               // Only once the model has parts: there is nothing to animate
               // before that, and the button would be a dead end.
               onAnimate={parts.length > 0 ? toggleAnimate : undefined}
+              allMarked={allMarked}
+              // Nothing to mark until the model has turned out to have parts.
+              onMarkAll={living.length > 0 ? markAll : undefined}
               dock={clip && (
                 <Timeline
                   clip={clip}
@@ -1154,17 +1199,43 @@ export default function AnalysisView({
               {/* Both panels live inside the viewer, so filling the window
                   carries them along instead of burying them under it. */}
 
-              {/* The selected part on its own, against the assembly on the
-                  right: a box around a trim piece says where it is, not what
-                  it is. */}
-              {shown && preview && (
-                <PartPreview
-                  url={preview}
-                  index={shown.at}
-                  name={shown.name}
-                  edit={edits[selected[0]]}
-                  onOpen={() => setOpened(selected[0])}
-                />
+              {/* Down the right: where the marked parts have been moved to,
+                  and the one that is marked on its own under it -- a box
+                  around a trim piece says where it is, not what it is. The
+                  figures come first, so a stage with no room for both keeps
+                  them and lets the thumbnail go rather than the other way
+                  round. */}
+              {(readTargets.length > 0 || (shown && preview)) && (
+                <div className="viewer-side">
+                  {readTargets.length > 0 && (clip
+                    ? (
+                      <ClipReadout
+                        clip={clip}
+                        targets={readTargets}
+                        title={readTitle}
+                        extent={reach}
+                        player={player}
+                        onClip={updateClip}
+                      />
+                    ) : (
+                      <TransformReadout
+                        title={readTitle}
+                        poses={readTargets.map((n) => edits[n] ?? NO_EDIT)}
+                        extent={reach}
+                        onReset={resetMarked}
+                      />
+                    ))}
+
+                  {shown && preview && (
+                    <PartPreview
+                      url={preview}
+                      index={shown.at}
+                      name={shown.name}
+                      edit={edits[selected[0]]}
+                      onOpen={() => setOpened(selected[0])}
+                    />
+                  )}
+                </div>
               )}
 
               {/* What the selected part is, over the model rather than beside

@@ -1,6 +1,6 @@
 import { useSyncExternalStore } from 'react'
 import { WHOLE, type Clip, type Pose } from '../api'
-import { isPosed, keyAt, poseAt, removeKey, seconds, setKey, track } from '../animation'
+import { isPosed, keyAt, poseAt, removeKey, restAxes, seconds, setKey, track } from '../animation'
 import type { Player } from '../player'
 import { TransformSliders } from './PartEditor'
 
@@ -51,6 +51,21 @@ export default function AnimEditor({ clip, targets, label, extent, player, onCli
     onClip(next)
   }
 
+  /**
+   * An undo beside a slider: key that axis, or that whole channel, back to
+   * rest at this moment. A keyframe rather than a deletion -- the poses either
+   * side of it are someone's work, and "back to nothing here" is a pose like
+   * any other.
+   */
+  const onReset = (key: keyof Pose, axis: number | null) => {
+    player.pause()
+    let next = clip
+    targets.forEach((t, j) => {
+      next = setKey(next, t, time, { ...poses[j], [key]: restAxes(poses[j], key, axis) })
+    })
+    onClip(next)
+  }
+
   /** Key the pose the targets are in right now, blended or not: a hold. */
   const addKey = () => {
     player.pause()
@@ -93,7 +108,10 @@ export default function AnimEditor({ clip, targets, label, extent, player, onCli
         )}
       </div>
 
-      <TransformSliders scope="anim" value={shared} extent={extent} turns={2} onAxis={onAxis} />
+      <TransformSliders
+        scope="anim" value={shared} extent={extent} turns={2}
+        onAxis={onAxis} onReset={onReset}
+      />
 
       <div className="anim-acts">
         <button
