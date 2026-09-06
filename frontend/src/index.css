@@ -218,9 +218,12 @@ button:disabled { cursor: not-allowed; }
 /* ---------- options ---------- */
 
 .opts { display: flex; flex-direction: column; gap: 12px; }
-.opt-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.opt-row { display: flex; align-items: center; justify-content: space-between; gap: 14px; }
 .opt-row label { color: var(--muted); font-size: 13px; }
-.opt-row .ctl { display: flex; align-items: center; gap: 8px; }
+.opt-row .ctl { display: flex; align-items: center; gap: 8px; flex: none; }
+/* Name over explanation, so the control column still lines up down the panel. */
+.opt-row .lbl { display: flex; flex-direction: column; gap: 3px; flex: 1; min-width: 0; }
+.opt-row .lbl .hint { font-size: 11px; color: var(--dim); line-height: 1.45; }
 
 input[type='number'], select {
   background: var(--panel-2); border: 1px solid var(--line); color: var(--text);
@@ -658,6 +661,12 @@ input[type='range'] { width: 110px; accent-color: var(--accent); }
 .stat { background: var(--panel); padding: 12px 14px; }
 .stat .k { font-size: 11px; color: var(--dim); text-transform: uppercase; letter-spacing: .04em; }
 .stat .v { font-size: 16px; font-weight: 600; margin-top: 2px; font-variant-numeric: tabular-nums; }
+.stat .was {
+  display: flex; align-items: baseline; gap: 5px; margin-top: 3px;
+  font-size: 11px; color: var(--dim); font-variant-numeric: tabular-nums;
+}
+.stat .was .cut { color: var(--ok); font-weight: 600; }
+.stat .was .grew { color: var(--muted); font-weight: 600; }
 
 .dl {
   display: flex; align-items: center; justify-content: center; gap: 8px;
@@ -665,6 +674,19 @@ input[type='range'] { width: 110px; accent-color: var(--accent); }
   background: var(--ok); color: #04140c; font-weight: 650; text-decoration: none;
 }
 .dl:hover { filter: brightness(1.08); }
+
+/* Download and "take it apart" are both endings to a conversion, so they sit
+   side by side rather than one under the other. */
+.done-actions { display: flex; gap: 8px; align-items: stretch; }
+/* Download is the primary and takes the room; the alt keeps its label's width.
+   Both need width:auto -- .dl sets width:100%, which fights the flex sizing. */
+.done-actions .dl { margin-top: 0; width: auto; flex: 1; min-width: 0; }
+.done-actions .dl.alt {
+  flex: 0 0 auto; white-space: nowrap; padding-left: 16px; padding-right: 16px;
+  background: var(--panel-2); color: var(--text); border: 1px solid var(--line);
+}
+.done-actions .dl.alt:hover { border-color: var(--accent); color: var(--accent); filter: none; }
+@media (max-width: 700px) { .done-actions { flex-direction: column; } }
 
 /* ---------- log ---------- */
 

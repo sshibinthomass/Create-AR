@@ -1,8 +1,8 @@
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   DEFAULT_OPTIONS, downloadUrl, formatCount, isEdited, NO_EDIT, previewUrl, WHOLE,
-  type Capabilities, type Clip, type Health, type NamerSettings, type PartDetails,
-  type PartEdit, type PartsDoc,
+  type Capabilities, type Clip, type Handoff, type Health, type NamerSettings,
+  type PartDetails, type PartEdit, type PartsDoc,
 } from '../api'
 import { newClip, pruneClips, setKey, splitPose, unpivot } from '../animation'
 import AnimEditor from '../components/AnimEditor'
@@ -29,7 +29,7 @@ const NAMELESS = new Set(['.stl', '.ply'])
  * already has, so only the changes travel.
  */
 export default function AnalysisView({
-  health, caps, active, settings, onOpenSettings,
+  health, caps, active, settings, onOpenSettings, incoming, onIncomingTaken,
 }: {
   health: Health | null
   caps: Capabilities | null
@@ -37,8 +37,14 @@ export default function AnalysisView({
   /** Owned by the app, edited on the Settings page. Null until they load. */
   settings: NamerSettings | null
   onOpenSettings: () => void
+  /** A conversion sent over from the Convert tab, to open straight away. */
+  incoming: Handoff | null
+  onIncomingTaken: () => void
 }) {
   const [file, setFile] = useState<File | null>(null)
+  // Set instead of `file` when the model arrived from the Convert tab: there is
+  // no File to hold, only the job the server already has.
+  const [sent, setSent] = useState<Handoff | null>(null)
   const [parts, setParts] = useState<string[]>([])
   const [renames, setRenames] = useState<Record<string, string>>({})
   // What each part is, keyed by its name in the file -- the same key `renames`
@@ -350,8 +356,9 @@ export default function AnalysisView({
   }, [clip, player, pivot, edits, updateClip])
 
 
-  function analyse() {
-    if (!file) return
+  // Everything held about the model that is being replaced. Shared by the two
+  // ways a model arrives: dropped here, or sent over from the Convert tab.
+  const forget = useCallback(() => {
     setParts([])
     setRenames({})
     setDetails({})
@@ -364,7 +371,34 @@ export default function AnalysisView({
     setClipId(null)
     player.stop()
     exported.setJob(null)
-    analysis.start(file, '.glb', DEFAULT_OPTIONS)
+  }, [player, exported])
+
+  // A conversion arriving from the Convert tab opens itself: the user pressed
+  // the button that means "take this apart", so making them press another one
+  // here would be asking the same question twice. Taken once and cleared, so a
+  // later tab switch does not re-run it.
+  const takeIncoming = analysis.startFrom
+  useEffect(() => {
+    if (!incoming) return
+    onIncomingTaken()
+    setFile(null)
+    setSent(incoming)
+    forget()
+    analysis.setError(null)
+    takeIncoming(incoming.jobId, '.glb', incoming.options)
+    // `forget` and the setters are stable; re-running on anything but a new
+    // hand-off would restart the analysis under the user.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [incoming])
+
+  function analyse() {
+    if (file) {
+      forget()
+      analysis.start(file, '.glb', DEFAULT_OPTIONS)
+    } else if (sent) {
+      forget()
+      analysis.startFrom(sent.jobId, '.glb', sent.options)
+    }
   }
 
   /**
@@ -430,13 +464,32 @@ export default function AnalysisView({
       <section className="card source">
         <div className="card-head"><h2>Model to inspect</h2></div>
         <div className="card-body source-body">
-          <Dropzone
-            file={file}
-            accept={caps?.inputs ?? []}
-            maxBytes={health?.maxUploadBytes ?? 512 * 1024 * 1024}
-            onSelect={(f) => { setFile(f); analysis.setError(null) }}
-            onReject={analysis.setError}
-          />
+          {sent ? (
+            <div className="file-chip">
+              <span className="ext">
+                {sent.name.slice(sent.name.lastIndexOf('.') + 1).toUpperCase()}
+              </span>
+              <div className="meta">
+                <div className="name" title={sent.name}>{sent.name}</div>
+                <div className="sub">converted on the Convert tab</div>
+              </div>
+              <button
+                className="x"
+                onClick={() => { setSent(null); forget(); analysis.setJob(null) }}
+                aria-label="Remove file"
+              >
+                &times;
+              </button>
+            </div>
+          ) : (
+            <Dropzone
+              file={file}
+              accept={caps?.inputs ?? []}
+              maxBytes={health?.maxUploadBytes ?? 512 * 1024 * 1024}
+              onSelect={(f) => { setFile(f); analysis.setError(null) }}
+              onReject={analysis.setError}
+            />
+          )}
           <div className="note">
             Every part the model was authored with is pulled outward from the
             centre of the assembly. Click a part — in the viewer or in the list
@@ -446,12 +499,14 @@ export default function AnalysisView({
           </div>
           <button
             className="go"
-            disabled={!file || !health?.ok || analysis.busy}
+            disabled={(!file && !sent) || !health?.ok || analysis.busy}
             onClick={analyse}
           >
             {analysis.uploading
               ? `Uploading ${analysis.uploadPct}%`
-              : analysis.busy ? 'Preparing…' : 'Analyse model'}
+              : analysis.busy
+                ? 'Preparing…'
+                : sent ? 'Analyse again' : 'Analyse model'}
           </button>
         </div>
         {analysis.job?.status === 'done' && (

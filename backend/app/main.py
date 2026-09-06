@@ -207,6 +207,20 @@ class Options(BaseModel):
     apply_modifiers: bool = True
     triangulate: bool = False
     decimate: float = Field(1.0, gt=0.0, le=1.0)
+    # A target total triangle count. Non-zero takes precedence over `decimate`:
+    # the two are the same knob asked for two ways, and a budget is the answer
+    # to "get this under the limit my viewer can take".
+    tri_budget: int = Field(0, ge=0, le=100_000_000)
+    # Longest edge a texture may keep, in pixels. 0 leaves every image alone.
+    texture_limit: int = Field(0, ge=0, le=8192)
+    texture_format: str = Field("auto", pattern="^(auto|jpeg|webp)$")
+    texture_quality: int = Field(85, ge=1, le=100)
+    # Join meshes to cut mesh and draw-call count. Loses the per-part names.
+    merge: str = Field("none", pattern="^(none|material|all)$")
+    # Merge-by-distance threshold in model units. 0 is off.
+    weld: float = Field(0.0, ge=0.0, le=1000.0)
+    # Drop unused material slots and loose geometry.
+    clean: bool = False
     animations: bool = True
     draco: bool = False
     draco_level: int = Field(6, ge=0, le=10)

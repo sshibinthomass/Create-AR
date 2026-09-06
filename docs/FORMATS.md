@@ -64,8 +64,9 @@ Two consequences worth knowing:
   `0.002 × 0.001 × 0.003`. This is correct, not a scaling bug.
 - **No merged vertices.** Each tessellated face carries its own vertices, so a
   six-faced box yields 24 vertices rather than 8, and is not watertight by
-  trimesh's definition. Enable *Simplify* or merge in a downstream tool if that
-  matters.
+  trimesh's definition. *Merge vertices within* (the `weld` option) stitches
+  them back together at a distance you choose, which is the direct fix; the
+  *Simplify* and *Triangle budget* controls reduce the count instead.
 
 ## Axis conventions
 
