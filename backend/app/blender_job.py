@@ -100,11 +100,20 @@ def _export_usd(path, o):
 
 
 def _export_fbx(path, o):
+    kw = {}
+    # The FBX exporter writes one take per NLA strip, and a strip belongs to
+    # one object -- so a clip that moves ten parts would come out as ten takes
+    # of the same name, each moving one part. With clips authored here the
+    # whole timeline is baked as a single take instead, the clips one after
+    # another, which is what USD and Alembic get as well.
+    if o.get("clips"):
+        kw["bake_anim_use_nla_strips"] = False
+        kw["bake_anim_use_all_actions"] = False
     bpy.ops.export_scene.fbx(
         filepath=path, path_mode="COPY", embed_textures=True,
         use_mesh_modifiers=bool(o.get("apply_modifiers", True)),
         bake_anim=bool(o.get("animations", True)),
-        axis_forward="-Z", axis_up="Y", apply_unit_scale=True)
+        axis_forward="-Z", axis_up="Y", apply_unit_scale=True, **kw)
 
 
 def _export_obj(path, o):
@@ -559,6 +568,241 @@ def apply_edits(mapping):
     return applied, styled, missing
 
 
+# --- animation ---------------------------------------------------------------
+# Clips are authored in the browser as keyframes -- a pose at a moment -- and
+# baked here to one sample per frame. Baking, rather than keying and letting
+# Blender interpolate, is what keeps the file matching the preview: the viewer
+# blends poses its own way, and every exporter below samples the scene frame
+# by frame anyway, so the frames are simply given the poses the viewer showed.
+
+FPS = 30
+
+
+def sample_pose(keys, t):
+    """The pose a track is in ``t`` seconds in: held before the first key and
+    after the last, blended in a straight line between neighbours.
+
+    Mirrors ``poseAt`` in frontend/src/animation.ts, which is what the viewer
+    drew -- the two have to agree or the file plays differently from the preview.
+    """
+    if t <= keys[0]["time"]:
+        return keys[0]
+    if t >= keys[-1]["time"]:
+        return keys[-1]
+    for a, b in zip(keys, keys[1:]):
+        if t <= b["time"]:
+            break
+    span = b["time"] - a["time"]
+    k = 0.0 if span <= 0 else (t - a["time"]) / span
+    return {
+        field: [a[field][i] + (b[field][i] - a[field][i]) * k for i in range(3)]
+        for field in ("move", "rotate", "scale")
+    }
+
+
+def write_samples(bag, rest, keys, frames):
+    """Bake one track onto a channelbag: a location, rotation and scale key on
+    every frame from 0 to ``frames`` inclusive, frame 0 being the clip's start.
+
+    ``rest`` is the node transform the deltas are laid on -- the part's pose as
+    the preview showed it, edits included -- with its parent inverse, so a part
+    that is the child of another composes the same way ``apply_edits`` does.
+    """
+    parent_inverse, node = rest
+    to_basis = parent_inverse.inverted()
+    location, rotation, scale = node.decompose()
+
+    columns = {("location", i): [] for i in range(3)}
+    columns.update({("rotation_quaternion", i): [] for i in range(4)})
+    columns.update({("scale", i): [] for i in range(3)})
+    previous = None
+    for frame in range(frames + 1):
+        pose = sample_pose(keys, frame / FPS)
+        move = to_blender_vector(pose["move"])
+        spin = to_blender_quaternion(
+            Euler([math.radians(a) for a in pose["rotate"]], "XYZ").to_quaternion())
+        factor = to_blender_scale(pose["scale"])
+        basis = to_basis @ Matrix.LocRotScale(
+            location + move,
+            rotation @ spin,
+            Vector((scale[i] * factor[i] for i in range(3))),
+        )
+        loc, quat, size = basis.decompose()
+        # q and -q are the same turn, but Blender blends between frames by
+        # component, so a sign flip between neighbours would whip the part
+        # round the long way.
+        if previous is not None and previous.dot(quat) < 0:
+            quat = -quat
+        previous = quat
+        for i in range(3):
+            columns[("location", i)].append(loc[i])
+            columns[("scale", i)].append(size[i])
+        for i in range(4):
+            columns[("rotation_quaternion", i)].append(quat[i])
+
+    count = frames + 1
+    for (path, index), values in columns.items():
+        curve = bag.fcurves.new(path, index=index)
+        curve.keyframe_points.add(count)
+        flat = [0.0] * (2 * count)
+        flat[0::2] = range(count)
+        flat[1::2] = values
+        curve.keyframe_points.foreach_set("co", flat)
+        for point in curve.keyframe_points:
+            point.interpolation = "LINEAR"
+        curve.update()
+
+
+def make_model_root(name, pivot):
+    """An empty every root object hangs from, for animating the model as one.
+
+    Put at the pivot the viewer turned the model about, so a rotation keyed
+    there swings the model about its own centre in the file too. The children
+    keep their world transforms through the reparenting.
+    """
+    root = bpy.data.objects.new(name, None)
+    bpy.context.scene.collection.objects.link(root)
+    root.location = to_blender_vector(pivot or (0.0, 0.0, 0.0))
+    bpy.context.view_layer.update()
+    inverse = root.matrix_world.inverted()
+    for ob in list(bpy.data.objects):
+        if ob is root or ob.parent is not None:
+            continue
+        ob.parent = root
+        ob.matrix_parent_inverse = inverse
+    bpy.context.view_layer.update()
+    return root
+
+
+def park_existing_animation():
+    """Move every active action onto the NLA, and say where the animation the
+    file arrived with ends.
+
+    Assigning a clip as an object's active action would replace the one it was
+    imported with; on a strip it survives, and the glTF exporter still writes
+    it as an animation of its own. The end frame is where the new clips are
+    laid down from, so on a single timeline they follow the original rather
+    than playing over it.
+    """
+    end = 0.0
+    for ob in bpy.data.objects:
+        ad = ob.animation_data
+        if ad is None:
+            continue
+        if ad.action is not None:
+            action = ad.action
+            start = int(math.floor(action.frame_range[0]))
+            strip = ad.nla_tracks.new().strips.new(action.name, start, action)
+            if ad.action_slot is not None:
+                strip.action_slot = ad.action_slot
+            ad.action = None
+        for track in ad.nla_tracks:
+            for strip in track.strips:
+                end = max(end, strip.frame_end)
+    return int(math.ceil(end)) + 1 if end > 0 else 0
+
+
+REST_KEY = {"time": 0.0, "move": [0.0, 0.0, 0.0], "rotate": [0.0, 0.0, 0.0],
+            "scale": [1.0, 1.0, 1.0]}
+
+
+def new_action(name):
+    action = bpy.data.actions.new(name)
+    layer = action.layers.new("Layer")
+    layer.strips.new(type="KEYFRAME")
+    return action
+
+
+def add_strip(ob, name, action, slot, start, extrapolation):
+    """Put ``action`` on a fresh NLA track of its own, which is the arrangement
+    the glTF exporter reads: one strip per track."""
+    track = ob.animation_data_create().nla_tracks.new()
+    track.name = name
+    strip = track.strips.new(name, start, action)
+    strip.action_slot = slot
+    strip.extrapolation = extrapolation
+    return strip
+
+
+def apply_clips(clips, root_name, sequential):
+    """Key every clip onto the parts it animates, one action per clip.
+
+    Every part a clip moves gets a slot in that clip's action, so the glTF
+    exporter -- which merges by action -- writes one named animation per clip,
+    however many parts it moves.
+
+    Where the strips go depends on who reads them. glTF reads the actions and
+    ignores the timeline, so every clip starts at frame 0. The formats that
+    sample the scene instead -- USD, FBX, Alembic -- know nothing of clips, so
+    for them (``sequential``) the clips are laid end to end, with a held rest
+    strip beneath each part so it sits still outside its own clips. The rest
+    strip is not written for glTF, where it would come out as a clip of its own.
+
+    A part is only ever at rest *because* something says so: an animated channel
+    that no strip covers evaluates to the property's default -- the origin, not
+    the part's own place -- which is also why for glTF nothing may start later
+    than frame 0, where the exporter reads each node's still transform.
+
+    Returns ``(keyed, missing)``: how many part-tracks were written, and the
+    targets no object answered to.
+    """
+    if not clips:
+        return 0, []
+
+    scene = bpy.context.scene
+    scene.render.fps = FPS
+    scene.render.fps_base = 1.0
+    existing_end = park_existing_animation()
+    frame = existing_end if sequential else 0
+    last = frame
+
+    rest = {}
+    rest_action = None
+    root = None
+    keyed = 0
+    missing = []
+    for clip in clips:
+        frames = max(1, int(round(float(clip["duration"]) * FPS)))
+        action = new_action(clip["name"])
+        for track in clip["tracks"]:
+            target = track["target"]
+            if target == "":
+                if root is None:
+                    root = make_model_root(root_name, track.get("pivot"))
+                ob = root
+            else:
+                ob = bpy.data.objects.get(target)
+                if ob is None:
+                    missing.append(target)
+                    continue
+            # The rest pose is read once, before any clip has touched the
+            # object: a second clip is a delta on the same pose as the first.
+            if ob.name not in rest:
+                rest[ob.name] = (ob.matrix_parent_inverse.copy(),
+                                 ob.matrix_parent_inverse @ ob.matrix_basis)
+                ob.rotation_mode = "QUATERNION"
+                if sequential:
+                    if rest_action is None:
+                        rest_action = new_action("Rest")
+                    slot = rest_action.slots.new(id_type="OBJECT", name=ob.name)
+                    write_samples(rest_action.layers[0].strips[0].channelbag(slot, ensure=True),
+                                  rest[ob.name], [REST_KEY], 1)
+                    add_strip(ob, "Rest", rest_action, slot, 0, "HOLD")
+            slot = action.slots.new(id_type="OBJECT", name=ob.name)
+            write_samples(action.layers[0].strips[0].channelbag(slot, ensure=True),
+                          rest[ob.name], track["keys"], frames)
+            add_strip(ob, clip["name"], action, slot, frame, "NOTHING")
+            keyed += 1
+        last = max(last, frame + frames)
+        if sequential:
+            frame += frames + 1
+
+    scene.frame_start = 0
+    scene.frame_end = max(last, 1)
+    scene.frame_set(0)
+    return keyed, sorted(set(missing))
+
+
 def apply_triangulate():
     for ob in bpy.data.objects:
         if ob.type == "MESH":
@@ -646,6 +890,17 @@ def main():
     emit("progress", pct=45, step="Transforming")
     apply_scale(float(o.get("scale", 1.0)))
     apply_center(o.get("center", "none"))
+    keyed, unmoved = apply_clips(
+        o.get("clips") or [], os.path.splitext(os.path.basename(dst))[0],
+        sequential=dst_ext not in (".glb", ".gltf"))
+    if keyed:
+        emit("info", message="Keyed " + str(keyed) + " part-track(s) across "
+             + str(len(o.get("clips") or [])) + " clip(s)")
+    if unmoved:
+        emit("warn", message="No part named " + ", ".join(
+            "'" + n + "'" for n in unmoved[:5]) + (
+            " (and " + str(len(unmoved) - 5) + " more)" if len(unmoved) > 5 else "")
+            + " -- those parts were not animated")
     if o.get("triangulate"):
         apply_triangulate()
     apply_decimate(float(o.get("decimate", 1.0)))

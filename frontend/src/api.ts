@@ -7,6 +7,8 @@ export interface Format {
   can_export: boolean
   mime: string
   note: string
+  /** Whether a file of this format can carry the animations made in the Analysis tab. */
+  can_animate: boolean
 }
 
 export interface Capabilities {
@@ -88,17 +90,52 @@ export interface Job {
 export type MaterialType = '' | 'plastic' | 'metal' | 'glass' | 'matte' | 'emissive'
 
 /**
- * A small tweak to one part, made in the Analysis tab.
+ * Where a part is put, as a *delta* on its own local transform.
  *
- * Every field is a *delta* on the part's own local transform, in the viewer's
- * axes and the model's units -- the same thing a gizmo drag produces. The
- * backend swizzles them onto Blender's axes, so rotation and scale pivot on the
- * part's origin exactly as they did on screen.
+ * In the viewer's axes and the model's units -- the same thing a gizmo drag
+ * produces. The backend swizzles them onto Blender's axes, so rotation and
+ * scale pivot on the part's origin exactly as they did on screen. An edit is
+ * one of these held still; a keyframe is one of these at a moment in time.
  */
-export interface PartEdit {
+export interface Pose {
   move: [number, number, number]
   rotate: [number, number, number]  // degrees, about the part's own axes
   scale: [number, number, number]
+}
+
+/** A pose a part passes through, `time` seconds into its clip. */
+export interface Keyframe extends Pose {
+  time: number
+}
+
+/** The target of a track that moves the whole model rather than one part. */
+export const WHOLE = ''
+
+/**
+ * Every keyframe one target has in a clip, in time order.
+ *
+ * The target is a part, by the name the file gives it, or `WHOLE` for the
+ * model as one -- which turns and grows about `pivot`, the centre the viewer
+ * measured, and which the backend is told so the file pivots where the
+ * preview did.
+ */
+export interface Track {
+  target: string
+  keys: Keyframe[]
+  pivot?: [number, number, number]
+}
+
+/** One named animation: how long it runs, and the tracks that play in it. */
+export interface Clip {
+  /** Only the browser's: tells two clips of the same name apart in the list. */
+  id: string
+  name: string
+  duration: number  // seconds
+  tracks: Track[]
+}
+
+/** A small tweak to one part, made in the Analysis tab: a pose held still, and a finish. */
+export interface PartEdit extends Pose {
   material: MaterialType
   color: string                     // '#rrggbb'
   /**
@@ -172,6 +209,8 @@ export interface ConvertOptions {
   /** Write parts.json beside the model and zip the two together. */
   bundle?: boolean
   part_details?: PartsDocEntry[]
+  /** Animations to key into the file. Only formats with `can_animate` take them. */
+  clips?: Clip[]
 }
 
 export const DEFAULT_OPTIONS: ConvertOptions = {

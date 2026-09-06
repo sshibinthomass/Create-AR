@@ -1,13 +1,17 @@
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
-  DEFAULT_OPTIONS, downloadUrl, formatCount, isEdited, NO_EDIT, previewUrl,
-  type Capabilities, type Health, type NamerSettings, type PartDetails,
+  DEFAULT_OPTIONS, downloadUrl, formatCount, isEdited, NO_EDIT, previewUrl, WHOLE,
+  type Capabilities, type Clip, type Health, type NamerSettings, type PartDetails,
   type PartEdit, type PartsDoc,
 } from '../api'
+import { newClip, pruneClips, setKey, splitPose, unpivot } from '../animation'
+import AnimEditor from '../components/AnimEditor'
 import Dropzone from '../components/Dropzone'
 import PartDialog from '../components/PartDialog'
 import PartEditor from '../components/PartEditor'
 import PartPreview from '../components/PartPreview'
+import Timeline from '../components/Timeline'
+import { Player } from '../player'
 import { useConversion } from '../useConversion'
 import { useNamer } from '../useNamer'
 
@@ -55,23 +59,75 @@ export default function AnalysisView({
   const [target, setTarget] = useState('.glb')
   const list = useRef<HTMLDivElement>(null)
 
+  // Animation is off until asked for: the clips are kept while it is off, so
+  // switching it off is a way of saving the model still, not of losing work.
+  const [animate, setAnimate] = useState(false)
+  const [clips, setClips] = useState<Clip[]>([])
+  const [clipId, setClipId] = useState<string | null>(null)
+  // What a keyframe lands on: the marked parts, or the model as one.
+  const [subject, setSubject] = useState<'parts' | 'model'>('parts')
+  // The model's centre, which a whole-model clip turns about -- measured by
+  // the viewer and sent along with the clip so the file pivots there too.
+  const [pivot, setPivot] = useState<[number, number, number]>([0, 0, 0])
+  const player = useMemo(() => new Player(), [])
+
   const analysis = useConversion()
   const exported = useConversion()
   const namer = useNamer()
   const clearExport = exported.setJob
 
   // A different model means a different set of parts; nothing carries over.
-  const onParts = useCallback((names: string[], span: number) => {
+  const onParts = useCallback((names: string[], span: number, centre: [number, number, number]) => {
     setParts(names)
     setReach(span)
+    setPivot(centre)
     setRenames({})
     setDetails({})
     setEdits({})
     setRemoved([])
     setSelected([])
     setOpened(null)
+    setAnimate(false)
+    setClips([])
+    setClipId(null)
+    setSubject('parts')
+    player.stop()
     clearExport(null)
-  }, [clearExport])
+  }, [clearExport, player])
+
+  const clip = animate ? clips.find((c) => c.id === clipId) ?? null : null
+  const wholeModel = clip !== null && subject === 'model'
+
+  // A clip's own length is the clock's; a different clip starts from the top.
+  useEffect(() => { player.stop() }, [player, clipId, animate])
+  useEffect(() => { player.setDuration(clip?.duration ?? 1) }, [player, clip?.duration])
+
+  const updateClip = useCallback((next: Clip) => {
+    setClips((all) => all.map((c) => (c.id === next.id ? next : c)))
+  }, [])
+
+  const addClip = useCallback(() => {
+    setClips((all) => {
+      const made = newClip(`Animation ${all.length + 1}`)
+      setClipId(made.id)
+      return [...all, made]
+    })
+  }, [])
+
+  const dropClip = useCallback((id: string) => {
+    setClips((all) => {
+      const left = all.filter((c) => c.id !== id)
+      setClipId((was) => (was === id ? left[0]?.id ?? null : was))
+      return left
+    })
+  }, [])
+
+  /** Turning animation on for the first time gives you a clip to start in. */
+  const toggleAnimate = useCallback((on: boolean) => {
+    setAnimate(on)
+    if (on && !clips.length) addClip()
+    else if (on && !clipId) setClipId(clips[0].id)
+  }, [clips, clipId, addClip])
 
   // What the marked parts have in common, with a neutral value on any axis they
   // disagree about -- the panel is showing the group, not any one part.
@@ -134,11 +190,19 @@ export default function AnalysisView({
 
   /** Plain click replaces the marks; shift or ctrl/cmd adds to or drops from them. */
   const mark = useCallback((name: string | null, additive: boolean) => {
+    // Picking a part is picking what to animate, too.
+    if (name !== null) setSubject('parts')
     setSelected((was) => {
       if (name === null) return additive ? was : []
       if (!additive) return [name]
       return was.includes(name) ? was.filter((n) => n !== name) : [...was, name]
     })
+  }, [])
+
+  /** Point the keyframes at the model as one. Nothing is marked while they are. */
+  const pickWhole = useCallback(() => {
+    setSubject('model')
+    setSelected([])
   }, [])
 
   const gone = useMemo(() => new Set(removed), [removed])
@@ -216,10 +280,29 @@ export default function AnalysisView({
     setDetails((was) => ({ ...notes, ...was }))
   }, [doc, parts])
 
+  /**
+   * The clips as they will be saved: only while animation is on, without the
+   * parts that are being deleted, and with the pivot on the whole-model track.
+   */
+  const animated = useMemo(() => (animate
+    ? pruneClips(clips, (t) => t === WHOLE || !gone.has(t)).map((c) => ({
+      ...c,
+      tracks: c.tracks.map((t) => (t.target === WHOLE ? { ...t, pivot } : t)),
+    }))
+    : []), [animate, clips, gone, pivot])
+  const animating = animated.length > 0
+  const keyCount = animated.reduce(
+    (n, c) => n + c.tracks.reduce((m, t) => m + t.keys.length, 0), 0)
+
+  // With animation to save, only the formats that can hold it are offered.
+  // OBJ, STL and PLY describe a single still and would drop it without a word.
   const outputs = useMemo(
-    () => (caps?.formats ?? []).filter((f) => f.can_export),
-    [caps],
+    () => (caps?.formats ?? []).filter((f) => f.can_export && (!animating || f.can_animate)),
+    [caps, animating],
   )
+  useEffect(() => {
+    if (animating && !outputs.some((f) => f.ext === target)) setTarget('.glb')
+  }, [animating, outputs, target])
 
   const stats = analysis.job?.resultStats ?? null
   const preview = analysis.job?.status === 'done' && analysis.job.hasPreview
@@ -238,6 +321,33 @@ export default function AnalysisView({
 
   const renamed = Object.keys(renames).length
   const adjusted = Object.values(edits).filter(isEdited).length
+  // Parts with a keyframe in the clip being worked on, for the mark in the list.
+  const keyed = useMemo(() => new Set(clip?.tracks.map((t) => t.target) ?? []), [clip])
+  const labelOf = useCallback(
+    (t: string) => (t === WHOLE ? 'Whole model' : renames[t] ?? t), [renames])
+  // What the animation editor poses: the model as one, or the marked parts.
+  const animTargets = useMemo(
+    () => (subject === 'model' ? [WHOLE] : selected.filter((n) => !gone.has(n))),
+    [subject, selected, gone])
+
+  /**
+   * A gizmo drag, read back from the viewer as one combined delta per part.
+   *
+   * With a clip open it is a keyframe at the playhead, not an edit: the clip's
+   * part of the pose is peeled off the static edit for a part, and turned into
+   * a pose about the pivot for the whole model.
+   */
+  const onGizmo = useCallback((changes: Record<string, PartEdit>) => {
+    if (!clip) {
+      setEdits((e) => ({ ...e, ...changes }))
+      return
+    }
+    const time = player.time
+    updateClip(Object.entries(changes).reduce((acc, [name, combined]) => setKey(
+      acc, name, time,
+      name === WHOLE ? unpivot(combined, pivot) : splitPose(combined, edits[name] ?? NO_EDIT),
+    ), clip))
+  }, [clip, player, pivot, edits, updateClip])
 
 
   function analyse() {
@@ -249,6 +359,10 @@ export default function AnalysisView({
     setRemoved([])
     setSelected([])
     setOpened(null)
+    setAnimate(false)
+    setClips([])
+    setClipId(null)
+    player.stop()
     exported.setJob(null)
     analysis.start(file, '.glb', DEFAULT_OPTIONS)
   }
@@ -305,6 +419,7 @@ export default function AnalysisView({
       remove: removed,
       bundle: wrap === 'bundle',
       part_details: wrap === 'bundle' ? described : undefined,
+      clips: animating ? animated : undefined,
     })
   }
 
@@ -469,6 +584,9 @@ export default function AnalysisView({
                   {isEdited(edits[name]) && !gone.has(name) && (
                     <span className="part-edited" title="This part has been moved, resized or restyled">✎</span>
                   )}
+                  {keyed.has(name) && !gone.has(name) && (
+                    <span className="part-keyed" title="This part has keyframes in the current animation">◆</span>
+                  )}
                   {renames[name] !== undefined && !gone.has(name) && (
                     <button
                       className="part-undo"
@@ -513,7 +631,9 @@ export default function AnalysisView({
                 </div>
               ))}
             </div>
-            {selected.length > 0 && (
+            {/* With a clip open the sliders that pose a part live in the
+                animation card, and pose it at the playhead instead. */}
+            {selected.length > 0 && !clip && (
               <PartEditor
                 names={selected.map((n) => renames[n] ?? n)}
                 value={shared}
@@ -581,6 +701,35 @@ export default function AnalysisView({
                 </div>
               )}
 
+              {animating && (
+                <div className="note">
+                  Saving with {animated.length === 1
+                    ? `the animation “${animated[0].name}”`
+                    : `${animated.length} animations`} — {keyCount} keyframe{keyCount === 1 ? '' : 's'} in
+                  all. Only formats that can hold animation are offered.{' '}
+                  {['.glb', '.gltf'].includes(target)
+                    ? 'glTF keeps each as a named clip, which a viewer lets you pick and play.'
+                    : target === '.fbx'
+                      ? 'FBX gets one take, the clips playing one after another.'
+                      : 'This format has one timeline, so the clips play one after another.'}
+                </div>
+              )}
+
+              {animate && !animating && (
+                <div className="note">
+                  Animation is on but nothing has a keyframe yet, so the model
+                  saves as a still.
+                </div>
+              )}
+
+              {!animate && clips.some((c) => c.tracks.length) && (
+                <div className="note">
+                  Animation is off, so the model saves without the{' '}
+                  {clips.length === 1 ? 'animation' : `${clips.length} animations`} you
+                  made. Turn it back on to keep them.
+                </div>
+              )}
+
               {exported.error && <div className="error-box" style={{ marginTop: 12 }}>{exported.error}</div>}
               {exported.job?.status === 'error' && (
                 <div className="error-box" style={{ marginTop: 12 }}>{exported.job.error}</div>
@@ -601,7 +750,9 @@ export default function AnalysisView({
                   ? `Saving… ${exported.job?.progress ?? 0}%`
                   : wrap === 'bundle'
                     ? `Save ${target.slice(1).toUpperCase()} + details as ZIP`
-                    : `Save as ${target.slice(1).toUpperCase()}`}
+                    : animating
+                      ? `Save animated ${target.slice(1).toUpperCase()}`
+                      : `Save as ${target.slice(1).toUpperCase()}`}
               </button>
 
               {exported.job?.status === 'done' && (
@@ -610,6 +761,105 @@ export default function AnalysisView({
                 </a>
               )}
             </div>
+          </section>
+        )}
+
+        {parts.length > 0 && (
+          <section className="card">
+            <div className="card-head">
+              <h2>Animation</h2>
+              {!animate && clips.some((c) => c.tracks.length) && (
+                <span className="head-note off">
+                  off · {clips.length} kept
+                </span>
+              )}
+              {animate && clips.length > 0 && (
+                <span className="head-note">{animating ? `${keyCount} keyframes` : 'no keyframes yet'}</span>
+              )}
+              <label className="switch head-switch" title={animate ? 'Turn animation off' : 'Turn animation on'}>
+                <input
+                  type="checkbox" checked={animate}
+                  aria-label="Animate the model"
+                  onChange={(e) => toggleAnimate(e.target.checked)}
+                />
+                <span />
+              </label>
+            </div>
+
+            {animate && (
+              <>
+                <div className="clips">
+                  {clips.map((c) => {
+                    const keys = c.tracks.reduce((n, t) => n + t.keys.length, 0)
+                    return (
+                      <div
+                        key={c.id}
+                        className={`clip-row${c.id === clipId ? ' on' : ''}`}
+                        onClick={() => setClipId(c.id)}
+                      >
+                        <span className="clip-dot" />
+                        <input
+                          value={c.name}
+                          aria-label="Name of the animation"
+                          onChange={(e) => updateClip({ ...c, name: e.target.value })}
+                          onFocus={() => setClipId(c.id)}
+                        />
+                        <span className="clip-len">
+                          {c.duration}s · {keys ? `${keys} key${keys === 1 ? '' : 's'}` : 'empty'}
+                        </span>
+                        <button
+                          className="part-drop"
+                          title="Delete this animation"
+                          onClick={(e) => { e.stopPropagation(); dropClip(c.id) }}
+                        >
+                          ✕
+                        </button>
+                      </div>
+                    )
+                  })}
+                  <button className="clip-add" onClick={addClip}>+ Add animation</button>
+                </div>
+
+                {clip && (
+                  <>
+                    <div className="anim-subject">
+                      <label>Animate</label>
+                      <div className="ctl wrap-pick">
+                        <button
+                          className={`wrap-opt${subject === 'parts' ? ' sel' : ''}`}
+                          onClick={() => setSubject('parts')}
+                        >
+                          Marked parts
+                        </button>
+                        <button
+                          className={`wrap-opt${subject === 'model' ? ' sel' : ''}`}
+                          onClick={pickWhole}
+                        >
+                          Whole model
+                        </button>
+                      </div>
+                    </div>
+
+                    <AnimEditor
+                      clip={clip}
+                      targets={animTargets}
+                      label={labelOf}
+                      extent={reach}
+                      player={player}
+                      onClip={updateClip}
+                    />
+                  </>
+                )}
+
+                {!clip && (
+                  <div className="card-body">
+                    <div className="note" style={{ marginTop: 0 }}>
+                      Add an animation to start keying poses into it.
+                    </div>
+                  </div>
+                )}
+              </>
+            )}
           </section>
         )}
       </div>
@@ -626,8 +876,11 @@ export default function AnalysisView({
               hidden={removed}
               selected={selected}
               onSelect={mark}
-              onEdit={(changes) => setEdits((e) => ({ ...e, ...changes }))}
+              onEdit={onGizmo}
               onParts={onParts}
+              clip={clip}
+              player={player}
+              wholeModel={wholeModel}
               active={active}
               placeholder={
                 analysis.job?.status === 'error'
@@ -697,6 +950,16 @@ export default function AnalysisView({
               )}
             </ModelViewer>
           </Suspense>
+
+          {clip && (
+            <Timeline
+              clip={clip}
+              player={player}
+              label={labelOf}
+              onClip={updateClip}
+              onPick={(t) => { if (t === WHOLE) pickWhole(); else mark(t, false) }}
+            />
+          )}
 
           {(analysis.busy || analysis.uploading) && (
             <div className="card-body">

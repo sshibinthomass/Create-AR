@@ -16,7 +16,7 @@ This is the `Convert` stage of the larger Create-AR Studio pipeline.
 ![React](https://img.shields.io/badge/React-18-61dafb)
 ![FastAPI](https://img.shields.io/badge/FastAPI-0.141-009688)
 ![Blender](https://img.shields.io/badge/Blender-5.2_LTS-f5792a)
-![Tests](https://img.shields.io/badge/tests-60_passing-3ecf8e)
+![Tests](https://img.shields.io/badge/tests-149_passing-3ecf8e)
 
 ---
 
@@ -509,6 +509,74 @@ alone, so renaming a hundred parts is not lost to undoing a move. Each appears
 only when there is something of its kind to undo, and neither touches what you
 have marked.
 
+## Animating parts
+
+Everything above produces a still. The **Animation** card under the parts list
+is off until you switch it on — a toggle in its head — because most models are
+saved as they are, and a timeline nobody asked for would only take room from the
+viewer. Switch it on and you get an animation to start in, the timeline under
+the viewer, and a pose panel in the card.
+
+An animation here is a **clip**: a name, a length in seconds, and keyframes.
+There can be several — **Add animation** makes another, each with its own name
+and length, and the one highlighted in the list is the one the timeline shows
+and the viewer plays. A keyframe is a pose at a moment: where a part is, how it
+is turned, how big it is. Between two keyframes the part travels in a straight
+line; before the first and after the last it holds still.
+
+Keying works the way animation tools have always worked once recording is on:
+
+1. Mark a part — or several, or choose **Whole model** to move the assembly as
+   one.
+2. Drag the playhead to a moment.
+3. Pose it, with the sliders in the card or the gizmo in the viewer. A keyframe
+   lands at the playhead the moment you do; the timeline gets a diamond and the
+   part gets a ◆ in the list.
+4. Move the playhead and pose again.
+
+Press play and it loops. **Add keyframe here** keys the pose the part is already
+in without changing it, which is how you make something wait. A diamond can be
+dragged to another moment or picked and deleted; **Remove key** in the pose
+panel drops the one under the playhead. Clicking a lane's name marks that part.
+
+Three things are worth knowing:
+
+- **A keyframe is a change on top of the part's edit.** Nudge a bracket into
+  place with the editor, then animate it, and the animation starts from where you
+  put it. Rotations are kept in degrees rather than folded to a turn, so a key at
+  360° is a full spin, not a part that never moves.
+- **The whole model turns about its own centre.** The viewer measures it, and
+  the file is told, so a spin keyed here is the same spin in the exported file
+  — which gains one root node at that centre for every part to hang from.
+- **Switching the toggle off keeps the clips** but saves the model without them,
+  and says so. Analysing a different model clears them.
+
+### Saving with animation
+
+With keyframes to save, **Save as** offers only formats that can carry them:
+GLB, glTF, USD in all its spellings, FBX and Alembic. OBJ, STL and PLY describe a
+single still and would drop the animation without a word, so they are not on
+the list while there is animation to lose. The server refuses them too, in case
+something other than the UI asks.
+
+The formats do not all carry the same thing:
+
+| | What you get |
+|---|---|
+| **GLB / glTF** | One named clip per animation, which a viewer lets you pick and play. |
+| **USD / USDZ**, **Alembic** | One timeline, the clips playing one after another. |
+| **FBX** | One take, the clips playing one after another. |
+
+Blender is handed the keyframes and bakes every clip to one pose per frame at
+30 fps, using the same blend the viewer drew, so what plays in the file is what
+played in the browser. glTF gets a clip per animation because the exporter
+writes one animation per Blender action, and every part a clip moves is given a
+slot in that clip's action. The others sample the scene frame by frame, and
+have no notion of separate clips, so the clips are laid end to end on the
+timeline for them, and a part sits still outside its own clips rather than
+holding its last pose. Any animation the file arrived with is kept ahead of the
+new clips rather than replaced. See [`docs/FORMATS.md`](docs/FORMATS.md).
+
 ---
 
 ## Quick start
@@ -753,6 +821,14 @@ import and export. Every edit field is a delta on the part's own local transform
 in the viewer's glTF-style Y-up axes, not Blender's Z-up; rotations are in
 degrees and scale is a multiplier per axis.
 
+`clips` is a list of animations to key into the file, each `{"name": "Spin",
+"duration": 3, "tracks": [...]}` where a track is `{"target": "Wheel", "keys":
+[{"time": 0}, {"time": 1.5, "rotate": [0, 360, 0]}]}` — a key carries the same
+`move`, `rotate` and `scale` deltas an edit does, laid on top of the edit. A
+target of `""` is the whole model, and that track carries a `pivot` to turn it
+about. Clips are only accepted for targets whose `can_animate` is true in
+`/api/formats`; the rest answer `400`.
+
 ## Sample models
 
 [`samples/`](samples/) holds one file per supported input format — an animated,
@@ -765,13 +841,15 @@ for STEP/IGES. Drag any of them onto the upload area.
 .venv/Scripts/python -m pytest backend/tests -q
 ```
 
-60 tests: format and alias resolution, upload validation, filename
+149 tests: format and alias resolution, upload validation, filename
 sanitisation, archive extraction safety (zip-slip, symlinks, entry floods,
 decompression bombs), model discovery across container formats and nesting
 depths, texture relinking, and real Blender conversions — STL to every headline
 target, STEP → USDZ, zipped OBJ with materials, USDZ archive spec compliance,
-scale/centre correctness, and part renaming through a re-export. Conversion
-tests skip automatically when Blender is absent.
+scale/centre correctness, part renaming through a re-export, and animation —
+one named glTF clip per animation, the whole-model root on its pivot, clips
+reaching USD and FBX, and stills refusing them. Conversion tests skip
+automatically when Blender is absent.
 
 ## Project layout
 
@@ -790,7 +868,10 @@ frontend/src/
   useConversion.ts upload + job polling, shared by both tabs
   views/           ConvertView (format → options → result), AnalysisView
   usePartShot.ts   one part rendered alone, for the preview and the dialog
+  animation.ts     clips and keyframes: the blend the viewer plays and Blender bakes
+  player.ts        the clock a clip plays to, kept outside React
   components/      Dropzone, OptionsPanel, ModelViewer (three.js + explode),
-                   PartEditor, PartPreview, PartDialog (one part, full size)
+                   PartEditor, PartPreview, PartDialog (one part, full size),
+                   AnimEditor (pose at the playhead), Timeline
 docs/FORMATS.md    what each engine actually provides, and why
 ```

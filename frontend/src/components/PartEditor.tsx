@@ -1,4 +1,4 @@
-import { MATERIALS, isEdited, type MaterialType, type PartEdit } from '../api'
+import { MATERIALS, isEdited, type MaterialType, type PartEdit, type Pose } from '../api'
 
 const AXES = ['X', 'Y', 'Z'] as const
 
@@ -51,6 +51,62 @@ function Slider({ id, label, value, min, max, step, format, onChange, disabled }
   )
 }
 
+/**
+ * The move, rotate and scale sliders, for a pose held still or a pose at a
+ * moment: the edit panel and the animation panel both put a part where it
+ * should be with these, and differ only in what they do with the answer.
+ *
+ * Nudging is bounded by the model's own size: a slider that ran to a fixed
+ * number of units would be uselessly coarse on a CAD bracket and uselessly
+ * fine on a building. `turns` widens the rotate sliders, for keyframes -- a
+ * spin needs to be able to say 360°, which an edit never does.
+ */
+export function TransformSliders({ scope, value, extent, turns = 0.5, onAxis }: {
+  scope: string
+  value: Pose
+  extent: number
+  turns?: number
+  onAxis: (key: keyof Pose, axis: number, v: number) => void
+}) {
+  const reach = extent
+  const decimals = reach < 1 ? 3 : reach < 100 ? 2 : 0
+  const spin = 360 * turns
+
+  return (
+    <>
+      <div className="edit-group">Move</div>
+      {AXES.map((axis, i) => (
+        <Slider
+          key={`m${axis}`} id={`${scope}-move-${axis}`} label={axis} value={value.move[i]}
+          min={-reach} max={reach} step={reach / 200}
+          format={(v) => v.toFixed(decimals)}
+          onChange={(v) => onAxis('move', i, v)}
+        />
+      ))}
+
+      <div className="edit-group">Rotate</div>
+      {AXES.map((axis, i) => (
+        <Slider
+          key={`r${axis}`} id={`${scope}-rot-${axis}`} label={axis} value={value.rotate[i]}
+          min={-spin} max={spin} step={1}
+          format={(v) => `${Math.round(v)}°`}
+          onChange={(v) => onAxis('rotate', i, v)}
+        />
+      ))}
+
+      <div className="edit-group">Scale</div>
+      {AXES.map((axis, i) => (
+        <Slider
+          key={`s${axis}`} id={`${scope}-scale-${axis}`} label={axis} value={value.scale[i]}
+          min={0.05} max={4} step={0.01}
+          format={(v) => `${v.toFixed(2)}×`}
+          onChange={(v) => onAxis('scale', i, v)}
+        />
+      ))}
+    </>
+  )
+}
+
 /** Move, rotate, scale and restyle whichever parts are currently marked. */
 export default function PartEditor({
   names, scope = 'edit', value, extent, onChange, onReset,
@@ -72,17 +128,11 @@ export default function PartEditor({
       : { ...value, material: kind })
   }
 
-  const setAxis = (key: 'move' | 'rotate' | 'scale', i: number, v: number) => {
+  const setAxis = (key: keyof Pose, i: number, v: number) => {
     const next = [...value[key]] as [number, number, number]
     next[i] = v
     set(key, next)
   }
-
-  // Nudging is bounded by the model's own size: a slider that ran to a fixed
-  // number of units would be uselessly coarse on a CAD bracket and uselessly
-  // fine on a building.
-  const reach = extent
-  const decimals = reach < 1 ? 3 : reach < 100 ? 2 : 0
 
   return (
     <div className="edit-panel">
@@ -105,35 +155,7 @@ export default function PartEditor({
         </div>
       )}
 
-      <div className="edit-group">Move</div>
-      {AXES.map((axis, i) => (
-        <Slider
-          key={`m${axis}`} id={`${scope}-move-${axis}`} label={axis} value={value.move[i]}
-          min={-reach} max={reach} step={reach / 200}
-          format={(v) => v.toFixed(decimals)}
-          onChange={(v) => setAxis('move', i, v)}
-        />
-      ))}
-
-      <div className="edit-group">Rotate</div>
-      {AXES.map((axis, i) => (
-        <Slider
-          key={`r${axis}`} id={`${scope}-rot-${axis}`} label={axis} value={value.rotate[i]}
-          min={-180} max={180} step={1}
-          format={(v) => `${v}°`}
-          onChange={(v) => setAxis('rotate', i, v)}
-        />
-      ))}
-
-      <div className="edit-group">Scale</div>
-      {AXES.map((axis, i) => (
-        <Slider
-          key={`s${axis}`} id={`${scope}-scale-${axis}`} label={axis} value={value.scale[i]}
-          min={0.05} max={4} step={0.01}
-          format={(v) => `${v.toFixed(2)}×`}
-          onChange={(v) => setAxis('scale', i, v)}
-        />
-      ))}
+      <TransformSliders scope={scope} value={value} extent={extent} onAxis={setAxis} />
 
       <div className="edit-group">Material</div>
       <div className="edit-row">

@@ -706,6 +706,188 @@ def test_styling_one_part_does_not_bleed_onto_another_in_obj():
     assert len(objects) == sum(1 for ln in groups if ln.startswith("usemtl ")), groups
 
 
+# --- animation ---------------------------------------------------------------
+
+def glb_animation(data: bytes, name: str) -> dict:
+    for anim in glb_doc(data).get("animations", []):
+        if anim.get("name") == name:
+            return anim
+    pytest.fail(f"no animation named {name!r}; got "
+                f"{[a.get('name') for a in glb_doc(data).get('animations', [])]}")
+
+
+def glb_channel_values(data: bytes, anim: dict, node_name: str, path: str) -> list[list[float]]:
+    """Every sample of one channel, decoded from the binary chunk."""
+    doc = glb_doc(data)
+    nodes = doc["nodes"]
+    channel = next(
+        (c for c in anim["channels"]
+         if nodes[c["target"]["node"]].get("name") == node_name and c["target"]["path"] == path),
+        None)
+    assert channel is not None, f"{anim.get('name')!r} has no {path} channel on {node_name!r}"
+    sampler = anim["samplers"][channel["sampler"]]
+    accessor = doc["accessors"][sampler["output"]]
+    view = doc["bufferViews"][accessor["bufferView"]]
+    json_len = struct.unpack("<I", data[12:16])[0]
+    start = 20 + json_len + 8 + view.get("byteOffset", 0) + accessor.get("byteOffset", 0)
+    width = {"VEC3": 3, "VEC4": 4}[accessor["type"]]
+    floats = struct.unpack_from(f"<{accessor['count'] * width}f", data, start)
+    return [list(floats[i:i + width]) for i in range(0, len(floats), width)]
+
+
+def test_formats_say_which_can_carry_animation():
+    body = client.get("/api/formats").json()
+    by_ext = {f["ext"]: f for f in body["formats"]}
+    for ext in (".glb", ".gltf", ".usdz", ".fbx", ".abc"):
+        assert by_ext[ext]["can_animate"] is True, ext
+    for ext in (".obj", ".stl", ".ply"):
+        assert by_ext[ext]["can_animate"] is False, ext
+
+
+def test_clips_are_cleaned_and_capped():
+    from app.main import Options
+
+    opts = Options(clips=[{
+        "name": "  Spin\tup ",
+        "duration": 2.0,
+        "tracks": [
+            # Keys arrive in any order, and one per moment: the later wins.
+            {"target": "a", "keys": [
+                {"time": 3.0, "move": [1, 0, 0]},   # past the end: never reached
+                {"time": 1.0, "rotate": [0, 90, 0]},
+                {"time": 1.0, "rotate": [0, 360, 0]},
+                {"time": 0.0},
+            ]},
+            {"target": "b", "keys": []},            # nothing to write
+            {"target": "", "pivot": [1, 2, 3], "keys": [{"time": 0.5}]},
+        ],
+    }, {"name": "Empty", "tracks": []}])
+
+    assert len(opts.clips) == 1
+    clip = opts.clips[0]
+    assert clip.name == "Spin up"
+    assert [t.target for t in clip.tracks] == ["a", ""]
+    assert [k.time for k in clip.tracks[0].keys] == [0.0, 1.0]
+    # A full turn is kept as a full turn, not folded back to nothing.
+    assert clip.tracks[0].keys[1].rotate == [0.0, 360.0, 0.0]
+    assert clip.tracks[1].pivot == [1.0, 2.0, 3.0]
+
+    with pytest.raises(ValidationError):
+        Options(clips=[{"duration": 0.0}])
+    with pytest.raises(ValidationError):
+        Options(clips=[{"tracks": [{"target": "a", "keys": [{"time": -1.0}]}]}])
+    with pytest.raises(ValidationError):
+        Options(clips=[{"tracks": [{"target": "a", "keys": [{"time": 0, "scale": [0, 1, 1]}]}]}])
+    with pytest.raises(ValidationError):
+        Options(clips=[{"tracks": [{"target": "a", "keys": []}]}] * 33)
+
+
+def test_clips_are_refused_on_a_format_that_cannot_carry_them():
+    clips = [{"name": "Spin", "duration": 1.0,
+              "tracks": [{"target": "a", "keys": [{"time": 0.0}, {"time": 1.0}]}]}]
+    r = client.post(
+        "/api/convert",
+        files={"file": ("cube.stl", CUBE_STL.read_bytes(), "application/octet-stream")},
+        data={"target": ".obj", "options": json.dumps({"clips": clips})},
+    )
+    assert r.status_code == 400
+    assert "cannot carry animation" in r.json()["detail"]
+    assert ".glb" in r.json()["detail"]
+
+
+@needs_blender
+def test_reexport_writes_each_clip_as_a_named_gltf_animation():
+    job = run_job("rig.glb", make_glb("Wheel", "Arm"), ".glb")
+    assert job["status"] == "done", job["error"]
+    before = client.get(f"/api/jobs/{job['id']}/download").content
+    arm_was = glb_node(before, "Arm").get("translation", [0.0, 0.0, 0.0])
+
+    clips = [
+        {"name": "Spin", "duration": 1.0, "tracks": [
+            # A full turn about the viewer's Y over the clip.
+            {"target": "Wheel", "keys": [
+                {"time": 0.0}, {"time": 1.0, "rotate": [0.0, 360.0, 0.0]}]},
+            # The arm rises one unit, on top of a static edit that already
+            # pushed it one unit along Z: the clip is a delta on the edit.
+            {"target": "Arm", "keys": [
+                {"time": 0.0}, {"time": 1.0, "move": [0.0, 1.0, 0.0]}]},
+        ]},
+        {"name": "Lift", "duration": 0.5, "tracks": [
+            # The whole model, about the pivot the viewer measured.
+            {"target": "", "pivot": [0.5, 0.5, 0.0], "keys": [
+                {"time": 0.0}, {"time": 0.5, "move": [0.0, 2.0, 0.0]}]},
+        ]},
+    ]
+    r = client.post(
+        f"/api/jobs/{job['id']}/reexport",
+        data={"target": ".glb", "options": json.dumps({
+            "edits": {"Arm": {"move": [0.0, 0.0, 1.0]}},
+            "clips": clips,
+        })},
+    )
+    assert r.status_code == 202, r.text
+    again = await_job(r.json()["id"])
+    assert again["status"] == "done", again["error"]
+    assert not again["warnings"], again["warnings"]
+
+    data = client.get(f"/api/jobs/{again['id']}/download").content
+    doc = glb_doc(data)
+    assert sorted(a["name"] for a in doc["animations"]) == ["Lift", "Spin"]
+
+    spin = glb_animation(data, "Spin")
+    times = doc["accessors"][spin["samplers"][0]["input"]]
+    assert times["min"] == pytest.approx([0.0], abs=1e-3)
+    assert times["max"] == pytest.approx([1.0], abs=1e-3)
+
+    # The arm starts where its edit put it and ends one unit higher. Its
+    # channel is relative to its parent -- and the whole-model clip has hung
+    # every part from a new root sitting on the pivot, so that is taken off.
+    pivot = [0.5, 0.5, 0.0]
+    origin = [arm_was[i] - pivot[i] for i in range(3)]
+    arm = glb_channel_values(data, spin, "Arm", "translation")
+    assert arm[0] == pytest.approx([origin[0], origin[1], origin[2] + 1.0], abs=1e-3)
+    assert arm[-1] == pytest.approx([origin[0], origin[1] + 1.0, origin[2] + 1.0], abs=1e-3)
+
+    # A full turn: the wheel is back where it started, having been elsewhere
+    # halfway. Quaternions, so a half turn about Y is (0, +-1, 0, 0).
+    wheel = glb_channel_values(data, spin, "Wheel", "rotation")
+    assert abs(wheel[0][3]) == pytest.approx(1.0, abs=1e-3)
+    assert abs(wheel[-1][3]) == pytest.approx(1.0, abs=1e-3)
+    assert abs(wheel[len(wheel) // 2][1]) == pytest.approx(1.0, abs=1e-2)
+
+    # The whole-model clip animates a new root the parts now hang from, and
+    # that root sits on the pivot.
+    lift = glb_animation(data, "Lift")
+    root_index = lift["channels"][0]["target"]["node"]
+    root = doc["nodes"][root_index]
+    assert "mesh" not in root
+    assert set(root.get("children", [])) == {
+        i for i, n in enumerate(doc["nodes"]) if n.get("name") in {"Wheel", "Arm"}}
+    assert root.get("translation") == pytest.approx([0.5, 0.5, 0.0], abs=1e-3)
+    moved = glb_channel_values(data, lift, root["name"], "translation")
+    assert moved[-1] == pytest.approx([0.5, 2.5, 0.0], abs=1e-3)
+
+
+@needs_blender
+@pytest.mark.parametrize("target", [".usda", ".fbx"])
+def test_clips_reach_the_single_timeline_formats(target):
+    job = run_job("pair.glb", make_glb("Housing", "Cover"), ".glb")
+    clips = [{"name": "Open", "duration": 1.0, "tracks": [
+        {"target": "Cover", "keys": [{"time": 0.0}, {"time": 1.0, "move": [0.0, 1.0, 0.0]}]}]}]
+    r = client.post(
+        f"/api/jobs/{job['id']}/reexport",
+        data={"target": target, "options": json.dumps({"clips": clips})},
+    )
+    assert r.status_code == 202, r.text
+    again = await_job(r.json()["id"])
+    assert again["status"] == "done", again["error"]
+    body = client.get(f"/api/jobs/{again['id']}/download").content
+    if target == ".usda":
+        text = body.decode("utf-8", "replace")
+        assert "timeSamples" in text
+        assert "timeCodesPerSecond = 30" in text
+
+
 @needs_blender
 def test_reexport_can_change_format_at_the_same_time():
     job = run_job("cube.stl", CUBE_STL.read_bytes(), ".glb")

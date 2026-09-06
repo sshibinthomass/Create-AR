@@ -92,6 +92,30 @@ test suite:
 - every entry uses `ZIP_STORED` (no deflate), and
 - the archive contains a `.usdc` or `.usda` root layer.
 
+## Animation
+
+The Analysis tab keys animation as clips of keyframes. Blender bakes each clip to
+one pose per frame at 30 fps (`FPS` in `blender_job.py`), because the viewer
+blends keys its own way and every exporter samples frame by frame regardless —
+baking is what makes the file play as the preview did.
+
+| Target | Carries it as | How |
+|---|:--|---|
+| glTF / GLB | One named animation per clip | One action per clip, a slot per part; the exporter (`export_animation_mode='ACTIONS'`, merge by action) writes one animation per action. Each strip sits on its own NLA track, which is the only arrangement that mode reads, and every strip starts at frame 0 -- the exporter reads each node's still transform there, and a channel no strip covers evaluates to the property default, not the part's own place. |
+| USD / USDZ | One timeline | `export_animation=True` samples the scene frame range; clips are laid end to end on the NLA, over a held `Rest` strip per part so a part sits still outside its own clips. |
+| Alembic | One timeline | Samples the scene frame range likewise. |
+| FBX | One take | The exporter normally writes a take *per NLA strip*, and a strip belongs to one object — a clip moving ten parts would come out as ten takes of the same name. With clips present, `bake_anim_use_nla_strips` and `bake_anim_use_all_actions` are both off, so the whole timeline is one take. |
+| OBJ / STL / PLY | — | A single still. `can_animate` is false and a request carrying clips is refused with `400`. |
+
+Verified against Blender 5.2: actions are slotted (`action.slots.new(id_type=
+'OBJECT')`, keys written through `layer.strips[0].channelbag(slot)`), frame 0
+exports as `0.0 s`, and a parented object's parent inverse is honoured in the
+sampled channels. Animating the whole model adds an empty at the viewer's pivot
+that every root object is parented to, so a turn keyed about the model's centre
+turns about it in the file as well. Any active action an object arrived with is
+pushed onto the NLA first, so imported animation survives alongside the new
+clips and the new clips start after it on the single-timeline formats.
+
 ## Multi-file outputs
 
 `.obj` emits `.obj` + `.mtl` + copied textures, and `.gltf` (separate) emits

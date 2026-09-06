@@ -13,7 +13,7 @@ from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field, ValidationError, field_validator
+from pydantic import BaseModel, Field, ValidationError, field_validator, model_validator
 
 from . import config, formats, naming, parts_doc
 from . import settings as settings_store
@@ -38,6 +38,10 @@ CHUNK = 1024 * 1024
 MAX_RENAMES = 500
 MAX_EDITS = 500
 MAX_REMOVALS = 500
+MAX_CLIPS = 32
+MAX_TRACKS = 500
+MAX_KEYS = 500
+MAX_CLIP_SECONDS = 600.0
 MAX_NAME_LEN = 120
 _SAFE_STEM = re.compile(r"[^A-Za-z0-9._-]+")
 
@@ -50,6 +54,7 @@ _MATERIAL_PATTERN = "^(|" + "|".join(MATERIAL_TYPES) + ")$"
 # the cap keeps a malformed slider from writing a part out at 1e30.
 MOVE_LIMIT = 1e6
 SCALE_LIMIT = 1000.0
+ROTATE_LIMIT = 360.0 * 100
 
 
 def _vec3(value: list[float], limit: float) -> list[float]:
@@ -64,18 +69,43 @@ def _vec3(value: list[float], limit: float) -> list[float]:
     return out
 
 
-class PartEdit(BaseModel):
-    """One part's transform and material override, from the Analysis tab.
+class Pose(BaseModel):
+    """Where a part is put, as a *delta* on its own local transform.
 
-    Every field is a *delta* on the part's own local transform, in the viewer's
-    glTF-style Y-up axes -- the space the user was dragging in. The backend
-    swizzles them onto Blender's axes, so rotation and scale pivot on the part's
-    origin exactly as they did on screen.
+    Authored in the viewer's glTF-style Y-up axes -- the space the user was
+    dragging in. The backend swizzles them onto Blender's axes, so rotation and
+    scale pivot on the part's origin exactly as they did on screen. An edit is
+    one of these held still; a keyframe is one of these at a moment in time.
     """
 
     move: list[float] = Field(default_factory=lambda: [0.0, 0.0, 0.0])
     rotate: list[float] = Field(default_factory=lambda: [0.0, 0.0, 0.0])  # degrees
     scale: list[float] = Field(default_factory=lambda: [1.0, 1.0, 1.0])
+
+    @field_validator("move")
+    @classmethod
+    def _clean_move(cls, value: list[float]) -> list[float]:
+        return _vec3(value, MOVE_LIMIT)
+
+    @field_validator("rotate")
+    @classmethod
+    def _clean_rotate(cls, value: list[float]) -> list[float]:
+        # Not wrapped to a turn: a key at 720 degrees means two turns, and
+        # wrapping it would make a spin into a twitch.
+        return _vec3(value, ROTATE_LIMIT)
+
+    @field_validator("scale")
+    @classmethod
+    def _clean_scale(cls, value: list[float]) -> list[float]:
+        axes = _vec3(value, SCALE_LIMIT)
+        if any(a <= 0 for a in axes):
+            raise ValueError("scale must be positive on every axis")
+        return axes
+
+
+class PartEdit(Pose):
+    """One part's transform and material override, from the Analysis tab."""
+
     # "" keeps whatever material the part was authored with.
     material: str = Field("", pattern=_MATERIAL_PATTERN)
     color: str = Field("#cccccc", pattern="^#[0-9a-fA-F]{6}$")
@@ -88,24 +118,6 @@ class PartEdit(BaseModel):
     roughness: float | None = Field(None, ge=0.0, le=1.0)
     metalness: float | None = Field(None, ge=0.0, le=1.0)
 
-    @field_validator("move")
-    @classmethod
-    def _clean_move(cls, value: list[float]) -> list[float]:
-        return _vec3(value, MOVE_LIMIT)
-
-    @field_validator("rotate")
-    @classmethod
-    def _clean_rotate(cls, value: list[float]) -> list[float]:
-        return _vec3(value, 360.0)
-
-    @field_validator("scale")
-    @classmethod
-    def _clean_scale(cls, value: list[float]) -> list[float]:
-        axes = _vec3(value, SCALE_LIMIT)
-        if any(a <= 0 for a in axes):
-            raise ValueError("scale must be positive on every axis")
-        return axes
-
     def is_noop(self) -> bool:
         return (
             not self.material
@@ -114,6 +126,77 @@ class PartEdit(BaseModel):
             and not any(self.rotate)
             and all(a == 1.0 for a in self.scale)
         )
+
+
+class Keyframe(Pose):
+    """A pose a part passes through, `time` seconds into its clip."""
+
+    time: float = Field(0.0, ge=0.0, le=MAX_CLIP_SECONDS)
+
+
+class Track(BaseModel):
+    """Every keyframe one target has in a clip.
+
+    The target is a part, by the name the file gives it -- or "" for the whole
+    model, which turns and grows about `pivot`, the point the viewer measured
+    as the model's centre. The pivot comes from the browser rather than being
+    measured again here, so the file pivots exactly where the preview did.
+    """
+
+    target: str = Field("", max_length=MAX_NAME_LEN)
+    pivot: list[float] | None = None
+    keys: list[Keyframe] = Field(default_factory=list)
+
+    @field_validator("pivot")
+    @classmethod
+    def _clean_pivot(cls, value: list[float] | None) -> list[float] | None:
+        return None if value is None else _vec3(value, MOVE_LIMIT)
+
+    @field_validator("keys")
+    @classmethod
+    def _order_keys(cls, value: list[Keyframe]) -> list[Keyframe]:
+        if len(value) > MAX_KEYS:
+            raise ValueError(f"at most {MAX_KEYS} keyframes per part")
+        # In time order, and one per moment: two poses at the same instant
+        # cannot both be passed through, so the later one sent wins.
+        by_time: dict[float, Keyframe] = {}
+        for key in value:
+            by_time[key.time] = key
+        return [by_time[t] for t in sorted(by_time)]
+
+
+class Clip(BaseModel):
+    """One named animation: how long it runs, and the tracks that play in it."""
+
+    name: str = Field("Animation", max_length=MAX_NAME_LEN)
+    duration: float = Field(3.0, gt=0.0, le=MAX_CLIP_SECONDS)
+    tracks: list[Track] = Field(default_factory=list)
+
+    @field_validator("name")
+    @classmethod
+    def _clean_name(cls, value: str) -> str:
+        # Cleaned like a part name: this ends up as a glTF animation's name.
+        name = " ".join(str(value).split())[:MAX_NAME_LEN]
+        name = "".join(ch for ch in name if ch.isprintable())
+        return name or "Animation"
+
+    @model_validator(mode="after")
+    def _trim_tracks(self) -> "Clip":
+        if len(self.tracks) > MAX_TRACKS:
+            raise ValueError(f"at most {MAX_TRACKS} animated parts per clip")
+        kept: list[Track] = []
+        seen: set[str] = set()
+        for track in self.tracks:
+            # A key past the end of the clip is never reached. It is dropped
+            # rather than pulled back to the end, because pulling it back would
+            # change the motion the preview showed on the way there.
+            track.keys = [k for k in track.keys if k.time <= self.duration]
+            if not track.keys or track.target in seen:
+                continue
+            seen.add(track.target)
+            kept.append(track)
+        self.tracks = kept
+        return self
 
 
 class Options(BaseModel):
@@ -143,6 +226,16 @@ class Options(BaseModel):
     # it comes from the browser, which is where the parts were named.
     bundle: bool = False
     part_details: list[parts_doc.PartDetail] = Field(default_factory=list)
+    # Animations authored in the Analysis tab, to be keyed into the file.
+    clips: list[Clip] = Field(default_factory=list)
+
+    @field_validator("clips")
+    @classmethod
+    def _drop_empty_clips(cls, value: list[Clip]) -> list[Clip]:
+        if len(value) > MAX_CLIPS:
+            raise ValueError(f"at most {MAX_CLIPS} animations per job")
+        # A clip in which nothing moves has nothing to write.
+        return [clip for clip in value if clip.tracks]
 
     @field_validator("part_details")
     @classmethod
@@ -187,6 +280,16 @@ class Options(BaseModel):
         # A part the user selected and then left alone carries a full default
         # edit; sending it would make the job look changed when it is not.
         return {str(k)[:MAX_NAME_LEN]: v for k, v in value.items() if not v.is_noop()}
+
+
+def _check_animatable(opts: Options, target_ext: str) -> None:
+    """Animation has to have somewhere to go; a still format would lose it silently."""
+    if opts.clips and not formats.can_animate(target_ext):
+        raise HTTPException(
+            400,
+            f"'{target_ext}' cannot carry animation. Save as one of "
+            f"{', '.join(formats.animated_exts())} to keep the clips.",
+        )
 
 
 def safe_stem(filename: str) -> str:
@@ -293,6 +396,7 @@ async def create_conversion(
         opts = Options(**json.loads(options or "{}"))
     except (json.JSONDecodeError, ValidationError) as exc:
         raise HTTPException(400, f"Invalid options: {exc}") from exc
+    _check_animatable(opts, target_ext)
 
     job_id, source_dir = new_job_dir()
     stem = safe_stem(file.filename or "model")
@@ -356,6 +460,7 @@ def reexport(job_id: str, target: str = Form(...), options: str = Form("{}")) ->
         opts = Options(**json.loads(options or "{}"))
     except (json.JSONDecodeError, ValidationError) as exc:
         raise HTTPException(400, f"Invalid options: {exc}") from exc
+    _check_animatable(opts, target_ext)
 
     sources = sorted(p for p in (config.JOBS_DIR / job_id / "source").glob("*") if p.is_file())
     if not sources:

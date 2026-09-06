@@ -10,9 +10,11 @@ import {
   Box3, Box3Helper, Color, Euler, Matrix3, Matrix4, Object3D, Quaternion, Vector3,
   type Group, type LineBasicMaterial, type Material, type Mesh,
 } from 'three'
-import { isRestyled, NO_EDIT, type GizmoMode, type PartEdit } from '../api'
+import { isRestyled, NO_EDIT, WHOLE, type Clip, type GizmoMode, type PartEdit } from '../api'
+import { applyPose, poseAbout, poseAt, REST } from '../animation'
 import { poseEdited, restyleNode } from '../partEdit'
 import { fileNames, partNodes, type NameSource } from '../partGraph'
+import type { Player } from '../player'
 
 /**
  * Image-based lighting built from in-scene emissive panels.
@@ -311,11 +313,12 @@ function PartLabels({ parts, names, selected, wrapper }: {
  * a child's effects first, so measuring there would size the box from the pose
  * the part held before the change that triggered it.
  */
-function SelectionBox({ part, separation, edit, wrapper }: {
+function SelectionBox({ part, separation, edit, wrapper, player }: {
   part: Part
   separation: number
   edit: PartEdit | undefined
   wrapper: RefObject<Group | null>
+  player: Player | null
 }) {
   const helper = useMemo(() => {
     const h = new Box3Helper(new Box3(), new Color('#5b8cff'))
@@ -329,7 +332,14 @@ function SelectionBox({ part, separation, edit, wrapper }: {
   const stale = useRef(true)
   useEffect(() => { stale.current = true }, [part, separation, edit])
 
+  // A playing clip moves the part every frame, so the box follows the clock
+  // too -- but only when the clock has actually moved, for the reason above.
+  const seen = useRef(-1)
   useFrame(() => {
+    if (player && player.time !== seen.current) {
+      seen.current = player.time
+      stale.current = true
+    }
     const root = wrapper.current
     if (!stale.current || !root) return
     stale.current = false
@@ -353,7 +363,7 @@ function SelectionBox({ part, separation, edit, wrapper }: {
  */
 function Model({
   url, separation, showAllLabels, labels, edits, hidden, gizmo, selected, onSelect,
-  onEdit, onParts,
+  onEdit, onParts, clip, player, wholeModel,
 }: {
   url: string
   separation: number
@@ -365,19 +375,25 @@ function Model({
   selected: readonly string[]
   onSelect: (name: string | null, additive: boolean) => void
   onEdit?: (changes: Record<string, PartEdit>) => void
-  onParts: (names: string[], reach: number) => void
+  onParts: (names: string[], reach: number, pivot: [number, number, number]) => void
+  clip: Clip | null
+  player: Player | null
+  wholeModel: boolean
 }) {
   const { scene, parser } = useGLTF(url)
   const wrapper = useRef<Group>(null)
 
-  const { scale, offset } = useMemo(() => {
+  const { scale, offset, pivot } = useMemo(() => {
     const box = new Box3().setFromObject(scene)
     const size = box.getSize(new Vector3())
     const centre = box.getCenter(new Vector3())
     const largest = Math.max(size.x, size.y, size.z)
     // Guard against degenerate or empty geometry producing 0 / Infinity.
     const k = Number.isFinite(largest) && largest > 0 ? 1 / largest : 1
-    return { scale: k, offset: centre.multiplyScalar(-k) }
+    // The model's centre, in its own space: what the whole model turns about
+    // when it is animated as one, and what the file is told to pivot on.
+    const pivot: [number, number, number] = [centre.x, centre.y, centre.z]
+    return { scale: k, offset: centre.multiplyScalar(-k), pivot }
   }, [scene])
 
   const { parts, reach } = useMemo(
@@ -385,7 +401,21 @@ function Model({
     [scene, parser],
   )
   const names = useMemo(() => parts.map((p) => p.name), [parts])
-  useEffect(() => onParts(names, reach), [names, reach, onParts])
+  useEffect(() => onParts(names, reach, pivot), [names, reach, pivot, onParts])
+
+  // The model as one thing the gizmo can hold: the scene root standing in as a
+  // part, at rest with no separation of its own, whose visible centre is the
+  // pivot. Only ever picked while a clip is being made for the whole model.
+  const whole = useMemo<Part>(() => ({
+    node: scene,
+    name: WHOLE,
+    base: new Vector3(),
+    baseQuat: new Quaternion(),
+    baseScale: new Vector3(1, 1, 1),
+    offset: new Vector3(),
+    toSlot: new Vector3(),
+    centre: new Vector3(pivot[0], pivot[1], pivot[2]),
+  }), [scene, pivot])
 
   // The part nodes belong to the loaded glTF scene, which is mounted whole as a
   // single <primitive>, so both the separation and the user's edits are applied
@@ -403,8 +433,39 @@ function Model({
   // above: that one re-runs on every edit, so mid-drag it would snap the very
   // node the gizmo is holding back to rest and the drag would walk away. The
   // parts belong to a cached glTF scene, so they still have to be put back when
-  // this model goes away.
-  useEffect(() => () => { for (const p of parts) poseNode(p, NO_EDIT, 0) }, [parts])
+  // this model goes away -- the scene root along with them, which a whole-model
+  // clip may have moved.
+  useEffect(() => () => {
+    for (const p of parts) poseNode(p, NO_EDIT, 0)
+    poseAbout(scene, [0, 0, 0], REST)
+  }, [parts, scene])
+
+  // Playing a clip: every frame, each part is put into its edited pose and the
+  // clip's pose at the clock's time laid on top, and the model as one is
+  // turned about its centre. Done here rather than in an effect because the
+  // clock runs outside React, and a frame is when the time is read. A part the
+  // gizmo is holding is left alone, as above. When the clip goes away the
+  // parts are posed once more without it.
+  const tracks = useMemo(() => new Map((clip?.tracks ?? []).map((t) => [t.target, t])), [clip])
+  const animated = useRef(false)
+  useFrame(() => {
+    if (dragging.current) return
+    if (!clip) {
+      if (!animated.current) return
+      animated.current = false
+      for (const p of parts) poseNode(p, edits[p.name] ?? NO_EDIT, separation)
+      poseAbout(scene, [0, 0, 0], REST)
+      return
+    }
+    animated.current = true
+    const time = player?.time ?? 0
+    for (const p of parts) {
+      poseNode(p, edits[p.name] ?? NO_EDIT, separation)
+      const track = tracks.get(p.name)
+      if (track) applyPose(p.node, poseAt(track, time))
+    }
+    poseAbout(scene, pivot, poseAt(tracks.get(WHOLE), time))
+  })
 
   // A deleted part is taken out of the picture rather than out of the graph:
   // deleting is undoable here, and the parts list, the indices the previews are
@@ -452,8 +513,11 @@ function Model({
   // conversions of the same job id never show a stale mesh.
   useEffect(() => () => useGLTF.clear(url), [url])
 
-  const marks = useMemo(() => new Set(selected), [selected])
-  const picked = useMemo(() => parts.filter((p) => marks.has(p.name)), [parts, marks])
+  const marks = useMemo(() => new Set(wholeModel ? [WHOLE] : selected), [selected, wholeModel])
+  const picked = useMemo(
+    () => (wholeModel ? [whole] : parts.filter((p) => marks.has(p.name))),
+    [parts, marks, wholeModel, whole],
+  )
   const gone = useMemo(() => new Set(hidden), [hidden])
   const labelled = (showAllLabels ? parts : picked).filter((p) => !gone.has(p.name))
 
@@ -565,7 +629,7 @@ function Model({
         {labelled.length > 0 && (
           <PartLabels
             parts={labelled}
-            names={labelled.map((p) => labels[p.name] ?? p.name)}
+            names={labelled.map((p) => (p.name === WHOLE ? 'Whole model' : labels[p.name] ?? p.name))}
             selected={marks}
             wrapper={wrapper}
           />
@@ -573,7 +637,7 @@ function Model({
         {picked.map((p) => (
           <SelectionBox
             key={p.name} part={p} separation={separation}
-            edit={edits[p.name]} wrapper={wrapper}
+            edit={edits[p.name]} wrapper={wrapper} player={clip ? player : null}
           />
         ))}
       </group>
@@ -637,9 +701,16 @@ interface Props {
   onSelect?: (name: string | null, additive: boolean) => void
   /**
    * The parts this model turned out to have, in the order they are drawn,
-   * with how far one may usefully be nudged in the space a move applies in.
+   * with how far one may usefully be nudged in the space a move applies in,
+   * and the model's centre in that space -- what it pivots on as a whole.
    */
-  onParts?: (names: string[], reach: number) => void
+  onParts?: (names: string[], reach: number, pivot: [number, number, number]) => void
+  /** The animation to play over the model, or none. */
+  clip?: Clip | null
+  /** The clock the clip plays to. */
+  player?: Player | null
+  /** The gizmo and the marks hold the whole model rather than its parts. */
+  wholeModel?: boolean
   /** False parks the render loop, for a viewer sitting on a hidden tab. */
   active?: boolean
   /**
@@ -742,7 +813,7 @@ const GIZMOS: { mode: Exclude<GizmoMode, null>; label: string; icon: JSX.Element
 export default function ModelViewer({
   url, placeholder, explodeOpen = false, labels = NO_LABELS, edits = NO_EDITS,
   hidden = NO_HIDDEN, selected = NO_SELECTION, onSelect, onEdit, onParts,
-  active = true, children,
+  clip = null, player = null, wholeModel = false, active = true, children,
 }: Props) {
   const [open, setOpen] = useState(explodeOpen)
   const [pct, setPct] = useState(explodeOpen ? RESTING_PCT : 0)
@@ -759,9 +830,9 @@ export default function ModelViewer({
   // away the names the user has typed.
   const sink = useRef(onParts)
   sink.current = onParts
-  const report = useCallback((names: string[], reach: number) => {
+  const report = useCallback((names: string[], reach: number, pivot: [number, number, number]) => {
     setParts(names.length)
-    sink.current?.(names, reach)
+    sink.current?.(names, reach, pivot)
   }, [])
 
   /**
@@ -865,6 +936,9 @@ export default function ModelViewer({
               onSelect={(name, additive) => onSelect?.(name, additive)}
               onEdit={onEdit}
               onParts={report}
+              clip={clip}
+              player={player}
+              wholeModel={wholeModel}
             />
           </Suspense>
 
@@ -982,13 +1056,15 @@ export default function ModelViewer({
         )}
       </div>
 
-      {onEdit && selected.length > 0 && (
+      {onEdit && (selected.length > 0 || wholeModel) && (
         <div className="gizmo-bar">
           {GIZMOS.map(({ mode, label, icon }) => (
             <button
               key={label}
               className={`gizmo-btn${gizmo === mode ? ' on' : ''}`}
-              title={`${label} the marked part${selected.length > 1 ? 's' : ''}`}
+              title={wholeModel
+                ? `${label} the whole model`
+                : `${label} the marked part${selected.length > 1 ? 's' : ''}`}
               onClick={() => setGizmo((was) => (was === mode ? null : mode))}
             >
               {icon}
@@ -999,8 +1075,10 @@ export default function ModelViewer({
       )}
 
       <div className="viewer-hint">
-        {gizmo && selected.length > 0
-          ? 'drag a handle to edit · drag elsewhere to orbit'
+        {gizmo && (selected.length > 0 || wholeModel)
+          ? clip
+            ? 'drag a handle to key a pose at the playhead · drag elsewhere to orbit'
+            : 'drag a handle to edit · drag elsewhere to orbit'
           : 'drag to orbit · scroll to zoom · shift-click to mark more'}
       </div>
     </div>

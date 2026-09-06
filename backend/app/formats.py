@@ -20,31 +20,38 @@ class Format:
     can_export: bool
     mime: str
     note: str = ""
+    # Whether the exporter can write keyframe animation into this format.
+    # OBJ, STL and PLY describe a single still; the rest carry a timeline.
+    can_animate: bool = False
 
 
 FORMATS: tuple[Format, ...] = (
     # --- realtime / AR delivery ---
     Format(".glb", "glTF Binary", "mesh", "blender", True, True,
-           "model/gltf-binary", "Best for web and Android AR. Supports Draco compression."),
+           "model/gltf-binary", "Best for web and Android AR. Supports Draco compression.",
+           can_animate=True),
     Format(".gltf", "glTF Separate", "mesh", "blender", True, True,
-           "model/gltf+json", "Emits .gltf + .bin + textures; downloaded as a .zip."),
+           "model/gltf+json", "Emits .gltf + .bin + textures; downloaded as a .zip.",
+           can_animate=True),
     Format(".usdz", "USDZ", "scene", "blender", True, True,
-           "model/vnd.usdz+zip", "Apple AR Quick Look. Exported Y-up for ARKit."),
+           "model/vnd.usdz+zip", "Apple AR Quick Look. Exported Y-up for ARKit.",
+           can_animate=True),
     Format(".usdc", "USD Binary", "scene", "blender", True, True,
-           "model/vnd.usd", ""),
+           "model/vnd.usd", "", can_animate=True),
     Format(".usda", "USD ASCII", "scene", "blender", True, True,
-           "model/vnd.usd", ""),
-    Format(".usd", "USD", "scene", "blender", True, True, "model/vnd.usd", ""),
+           "model/vnd.usd", "", can_animate=True),
+    Format(".usd", "USD", "scene", "blender", True, True, "model/vnd.usd", "",
+           can_animate=True),
 
     # --- DCC interchange ---
     Format(".fbx", "Autodesk FBX", "mesh", "blender", True, True,
-           "application/octet-stream", "Textures embedded when present."),
+           "application/octet-stream", "Textures embedded when present.", can_animate=True),
     Format(".obj", "Wavefront OBJ", "mesh", "blender", True, True,
            "model/obj", "Emits .obj + .mtl + textures; downloaded as a .zip."),
     Format(".abc", "Alembic", "scene", "blender", True, True,
-           "application/octet-stream", "Baked geometry cache."),
+           "application/octet-stream", "Baked geometry cache.", can_animate=True),
     Format(".blend", "Blender", "scene", "blender", True, False,
-           "application/octet-stream", "Accepted as input only."),
+           "application/octet-stream", "Accepted as input only.", can_animate=True),
 
     # --- mesh / printing ---
     Format(".stl", "STL", "mesh", "blender", True, True,
@@ -133,6 +140,16 @@ def is_supported_input(ext: str) -> bool:
 def is_supported_output(ext: str) -> bool:
     fmt = BY_EXT.get(canonical(ext))
     return bool(fmt and fmt.can_export)
+
+
+def can_animate(ext: str) -> bool:
+    """Whether a file of this format can carry the animations authored in the app."""
+    fmt = BY_EXT.get(canonical(ext))
+    return bool(fmt and fmt.can_export and fmt.can_animate)
+
+
+def animated_exts() -> list[str]:
+    return [f.ext for f in FORMATS if f.can_export and f.can_animate]
 
 
 def unsupported_note(ext: str) -> str | None:
