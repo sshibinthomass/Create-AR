@@ -1,9 +1,15 @@
 """Persisted settings for the part namer.
 
-The file lives in the data directory rather than the repo. That directory is
-already git-ignored and is already the thing a deployment points at a volume,
-which is what this needs: the settings hold an Azure OpenAI key, so they must
-survive a restart without ever being committed.
+Everything typed on the settings page is written to one file in the data
+directory and read back on the next start, so nothing has to be entered twice.
+That directory is git-ignored and is the thing a deployment points at a volume,
+which is what this needs: the settings hold API keys, so they have to survive a
+restart without ever being committed.
+
+The keys themselves are encrypted in that file -- see vault.py for what that
+does and does not protect against. Everything stays on this machine: the file
+is local, the keys are never sent to the browser, and they leave only in the
+request to whichever provider the user chose.
 
 Environment variables seed whatever the file does not already say, so a
 container can be configured without anyone opening the settings panel, while a
@@ -17,7 +23,7 @@ import os
 
 from pydantic import BaseModel, Field, ValidationError
 
-from . import config
+from . import config, vault
 
 SETTINGS_PATH = config.DATA_DIR / "settings.json"
 
@@ -171,25 +177,55 @@ def _from_env() -> dict:
 
 
 def load() -> Settings:
-    """Read the saved settings, falling back to the environment and defaults."""
+    """Read the saved settings, falling back to the environment and defaults.
+
+    Keys come back decrypted, so everything downstream -- the provider clients,
+    ``configured()`` -- works in plaintext and knows nothing about sealing. A
+    file written before the keys were encrypted still reads, and is re-sealed
+    the first time it is loaded rather than waiting for someone to press Save.
+    """
     try:
         saved = json.loads(SETTINGS_PATH.read_text("utf-8"))
     except (OSError, json.JSONDecodeError):
         saved = {}
     if not isinstance(saved, dict):
         saved = {}
+
+    plaintext_on_disk = any(
+        saved.get(field) and not vault.is_sealed(saved[field])
+        for field in KEY_FIELDS.values()
+    )
+    for field in KEY_FIELDS.values():
+        if saved.get(field):
+            saved[field] = vault.unseal(saved[field])
+
     try:
-        return Settings(**{**_from_env(), **saved})
+        settings = Settings(**{**_from_env(), **saved})
     except ValidationError:
         # A hand-edited or half-written file should not take the app down with
         # it; the panel will show the defaults and overwrite it on the next save.
         return Settings(**_from_env())
 
+    if plaintext_on_disk:
+        try:
+            save(settings)
+        except OSError:
+            pass  # Read-only data directory: still usable, just not upgraded.
+    return settings
+
 
 def save(settings: Settings) -> None:
+    """Write the settings out, with every API key sealed.
+
+    The object handed in is left alone -- it is the live settings the caller is
+    still using -- so the sealing happens on the dict on its way to the file.
+    """
     config.ensure_dirs()
+    data = settings.model_dump()
+    for field in KEY_FIELDS.values():
+        data[field] = vault.seal(data.get(field) or "")
     scratch = SETTINGS_PATH.with_suffix(".json.tmp")
-    scratch.write_text(json.dumps(settings.model_dump(), indent=2), "utf-8")
+    scratch.write_text(json.dumps(data, indent=2), "utf-8")
     os.replace(scratch, SETTINGS_PATH)
     try:
         SETTINGS_PATH.chmod(0o600)

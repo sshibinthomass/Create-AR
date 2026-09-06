@@ -209,7 +209,47 @@ the jobs live in), so they survive a restart and never reach the repository.
 
 An API key is write-only from the browser: the server never sends one back, only
 which providers it holds a key for, so saving with a key field blank keeps the
-stored key and forgetting one is its own button.
+stored key and forgetting one is its own button. A blank key field is therefore
+not an empty setting — the dot beside a provider and the field's placeholder are
+how a stored key shows itself, since showing the key would undo the reason it is
+only ever written.
+
+### Where it all lives, and what is encrypted
+
+Everything stays on the machine running the backend. `settings.json` sits in the
+data directory, which is git-ignored *and* listed in `.dockerignore`, so it
+reaches neither the repository nor an image. Nothing is sent anywhere else: the
+keys are read back only to authenticate the request to whichever provider you
+picked.
+
+The keys in that file are **encrypted** rather than written in the clear —
+Fernet (AES-128-CBC with an HMAC), one sealed value per key, marked `enc:v1:`.
+That is what stops a copy of the file from being a copy of the key: a backup, a
+synced folder, a container built with the data directory in it, a
+`cat settings.json` pasted into a bug report.
+
+Be clear about what it does *not* do. The master key is written beside the
+settings as `secret.key` with owner-only permissions, because the app has to
+start unattended, so anyone who can already read the data directory can read
+both. To close that gap, put the master key somewhere else:
+
+```bash
+CONVERTER_SECRET_KEY="<a Fernet key>"
+```
+
+With that set, nothing on disk decrypts on its own — hand it in from a real
+secret store, a systemd credential or a Docker secret, and no key file is
+written at all. Generate one with:
+
+```bash
+python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+```
+
+A settings file written before the keys were encrypted still loads, and is
+sealed the first time it is read rather than waiting for someone to press Save.
+A key that will not decrypt — a data directory copied without its key, a rotated
+master key — reads as *absent* rather than raising: the page then shows that
+provider as having no key, which is both true and fixable by typing it again.
 
 On a fresh install the Azure fields are seeded from `AZURE_OPENAI_ENDPOINT`,
 `AZURE_OPENAI_API_KEY`, `AZURE_OPENAI_DEPLOYMENT` and `AZURE_OPENAI_API_VERSION`,
@@ -719,6 +759,8 @@ backend/app/
   formats.py       single source of truth for supported formats
   jobs.py          in-memory job store + worker pool
   main.py          FastAPI routes
+  settings.py      the naming settings, persisted in the data directory
+  vault.py         sealing the API keys in that file, and what that protects
 frontend/src/
   App.tsx          shell: health/capabilities and the two tabs
   useConversion.ts upload + job polling, shared by both tabs

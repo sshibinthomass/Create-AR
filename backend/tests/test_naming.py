@@ -16,7 +16,7 @@ from fastapi.testclient import TestClient
 
 os.environ.setdefault("CONVERTER_DATA_DIR", str(Path(__file__).parent / "_data"))
 
-from app import naming, settings as settings_store  # noqa: E402
+from app import naming, settings as settings_store, vault  # noqa: E402
 from app.main import app  # noqa: E402
 
 client = TestClient(app)
@@ -148,6 +148,85 @@ def test_settings_survive_a_restart_and_stay_out_of_the_repo():
     assert settings_store.load().batch_size == 11
     # The data directory is git-ignored, which is the whole reason it is here.
     assert settings_store.SETTINGS_PATH.is_relative_to(settings_store.config.DATA_DIR)
+
+
+def test_every_setting_comes_back_after_a_restart():
+    """The point of the file: nothing typed on the page is typed twice."""
+    configure(provider="openai", openai_key="sk-typed-once", openai_model="gpt-5",
+              mode="single", batch_size=7, concurrency=2, context_shot=False,
+              describe=False, instructions="house style")
+    again = settings_store.load()
+    assert (again.provider, again.openai_model, again.mode) == ("openai", "gpt-5", "single")
+    assert (again.batch_size, again.concurrency) == (7, 2)
+    assert (again.context_shot, again.describe) == (False, False)
+    assert again.instructions == "house style"
+    assert again.openai_key == "sk-typed-once"
+
+
+def test_the_keys_are_encrypted_on_disk():
+    configure(openai_key="sk-plain-text-please-no")
+    raw = settings_store.SETTINGS_PATH.read_text("utf-8")
+    assert "sk-plain-text-please-no" not in raw
+    assert "secret-key" not in raw          # the azure one configure() sets
+    assert json.loads(raw)["openai_key"].startswith(vault.PREFIX)
+    # ...and are perfectly readable to the app itself.
+    assert settings_store.load().openai_key == "sk-plain-text-please-no"
+
+
+def test_a_plaintext_file_from_an_older_build_is_sealed_on_first_load():
+    configure()
+    stale = json.loads(settings_store.SETTINGS_PATH.read_text("utf-8"))
+    stale["azure_key"] = "written-before-we-encrypted"
+    settings_store.SETTINGS_PATH.write_text(json.dumps(stale), encoding="utf-8")
+
+    assert settings_store.load().azure_key == "written-before-we-encrypted"
+    # Reading it was enough to upgrade it; nobody had to press Save.
+    raw = settings_store.SETTINGS_PATH.read_text("utf-8")
+    assert "written-before-we-encrypted" not in raw
+    assert json.loads(raw)["azure_key"].startswith(vault.PREFIX)
+
+
+def test_a_key_that_will_not_decrypt_reads_as_absent(monkeypatch):
+    """A data directory copied without its key, or a rotated master key.
+
+    Reporting the key as missing is both true and fixable by typing it again;
+    raising here would take the whole settings page down instead.
+    """
+    configure(provider="openai", openai_key="sk-sealed-with-the-old-key")
+    monkeypatch.setenv(vault.ENV_MASTER_KEY,
+                       vault.Fernet.generate_key().decode("ascii"))
+    vault.forget_cipher()
+    try:
+        lost = settings_store.load()
+        assert lost.openai_key == ""
+        assert lost.configured() is False
+        assert lost.public()["keys"]["openai"] is False
+    finally:
+        monkeypatch.delenv(vault.ENV_MASTER_KEY, raising=False)
+        vault.forget_cipher()
+
+
+def test_the_master_key_can_live_outside_the_data_directory(monkeypatch):
+    monkeypatch.setenv(vault.ENV_MASTER_KEY,
+                       vault.Fernet.generate_key().decode("ascii"))
+    vault.forget_cipher()
+    try:
+        assert vault.key_location() is None
+        sealed = vault.seal("sk-held-elsewhere")
+        assert vault.unseal(sealed) == "sk-held-elsewhere"
+    finally:
+        monkeypatch.delenv(vault.ENV_MASTER_KEY, raising=False)
+        vault.forget_cipher()
+    # Back on the key file, the value sealed with the env key is unreadable --
+    # which is the point of having put it somewhere else.
+    assert vault.key_location() == settings_store.config.SECRET_KEY_PATH
+
+
+def test_sealing_leaves_an_empty_key_empty():
+    # An empty field means "no key", and must not become ciphertext that
+    # decrypts to nothing -- `public()` reports on truthiness.
+    assert vault.seal("") == ""
+    assert vault.unseal("") == ""
 
 
 def test_a_corrupt_settings_file_falls_back_to_the_defaults():

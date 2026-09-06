@@ -16,6 +16,8 @@ dependencies = [
     "numpy>=1.24",
     "cascadio>=0.1.1",
     "py7zr>=0.20",
+    # Sealing the API keys held in settings.json. See app/vault.py.
+    "cryptography>=42",
     # Naming parts from their renders. Which one is used is a setting; both
     # are installed so switching provider needs no reinstall.
     "openai>=1.40",
