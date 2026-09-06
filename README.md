@@ -199,6 +199,17 @@ JSON object and given the reply's shape in the prompt; Anthropic is handed a
 JSON schema to enforce, and its refusals are reported rather than parsed as a
 name.
 
+**Not every OpenAI-shaped model takes the same parameters.** The o-series and
+GPT-5 renamed `max_tokens` to `max_completion_tokens` and will not have
+`temperature` set at all, while DeepSeek and the other compatible servers know
+only the older spelling. Which applies cannot be read off the model's name — an
+Azure deployment is called whatever its owner called it, and a compatible
+endpoint may be serving anything — so it is not guessed at. The first request
+is sent as normal, and a refusal that names the parameter it will not take is
+retried with that one changed and the answer remembered for the rest of the
+run. A refusal about anything else — a bad key, a model that does not
+exist — is reported as it stands rather than retried.
+
 ### Settings
 
 The **gear** in the top-right corner opens them — provider and its credentials,

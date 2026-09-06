@@ -190,6 +190,66 @@ def _budget(req: NameRequest) -> int:
     return 200 + (900 if req.describe else 80) * len(req.parts)
 
 
+# Newer OpenAI models refuse request parameters the rest of them accept: the
+# o-series and GPT-5 renamed max_tokens, and fix temperature at its default.
+# Which of these apply cannot be read off the model name -- an Azure deployment
+# is called whatever its owner called it, and an OpenAI-compatible endpoint may
+# be serving anything at all -- so they are discovered from the first refusal
+# and remembered, rather than guessed at from a list of names that goes stale.
+RENAME_MAX_TOKENS = "max_tokens->max_completion_tokens"
+DROP = "drop:"
+# Parameters worth retrying without. Anything else the model dislikes is a real
+# error: dropping it silently would change what was asked for.
+DROPPABLE = ("temperature", "top_p")
+
+# Keyed by provider, endpoint and model, because one server can host both kinds.
+_quirks: dict[tuple[str, str, str], set[str]] = {}
+
+
+def _shaped(body: dict, quirks: set[str]) -> dict:
+    out = dict(body)
+    for quirk in quirks:
+        if quirk == RENAME_MAX_TOKENS:
+            if "max_tokens" in out:
+                out["max_completion_tokens"] = out.pop("max_tokens")
+        elif quirk.startswith(DROP):
+            out.pop(quirk[len(DROP):], None)
+    return out
+
+
+def _refusal(exc: Exception) -> tuple[str, str, str]:
+    """The code, parameter and message an OpenAI-shaped error carries.
+
+    Read from the structured body where the SDK provides one, since a gateway
+    in front of the model may reword the message but keeps the fields.
+    """
+    body = getattr(exc, "body", None)
+    detail = body.get("error") if isinstance(body, dict) else None
+    if not isinstance(detail, dict):
+        detail = {}
+    return (
+        str(detail.get("code") or getattr(exc, "code", "") or ""),
+        str(detail.get("param") or getattr(exc, "param", "") or ""),
+        str(detail.get("message") or exc),
+    )
+
+
+def _quirk_for(exc: Exception) -> str | None:
+    """Which parameter to change, if this refusal is about one."""
+    code, param, message = _refusal(exc)
+    # The rename is worth spotting from the message alone: it names the
+    # replacement outright, and not every server sets `param`.
+    if "max_completion_tokens" in message and "max_tokens" in message:
+        return RENAME_MAX_TOKENS
+    if code not in {"unsupported_parameter", "unsupported_value"}:
+        return None
+    if param == "max_tokens":
+        return RENAME_MAX_TOKENS
+    if param in DROPPABLE:
+        return DROP + param
+    return None
+
+
 def _ask_openai(req: NameRequest, settings: Settings) -> str | None:
     """Azure OpenAI, OpenAI itself, or anything wearing the same API."""
     # Imported inside the call rather than at module scope so the rest of the
@@ -216,20 +276,36 @@ def _ask_openai(req: NameRequest, settings: Settings) -> str | None:
             timeout=120.0, max_retries=1,
         )
 
-    try:
-        reply = client.chat.completions.create(
-            model=settings.model(),
-            messages=[
-                {"role": "system", "content": instructions_for(req, settings)},
-                {"role": "user", "content": _blocks(req)},
-            ],
-            response_format={"type": "json_object"},
-            temperature=0.2,
-            max_tokens=_budget(req),
-        )
-    except OpenAIError as exc:
-        raise NamingError(str(exc)) from exc
-    return reply.choices[0].message.content
+    body = {
+        "model": settings.model(),
+        "messages": [
+            {"role": "system", "content": instructions_for(req, settings)},
+            {"role": "user", "content": _blocks(req)},
+        ],
+        "response_format": {"type": "json_object"},
+        "temperature": 0.2,
+        "max_tokens": _budget(req),
+    }
+    where = (settings.provider, settings.compatible_url, settings.model())
+    known = _quirks.setdefault(where, set())
+
+    # One attempt per parameter that could need changing, plus the first. Every
+    # retry is driven by the model naming the parameter it will not take, so
+    # this cannot spin: a refusal it has already accommodated ends the loop.
+    for _ in range(len(DROPPABLE) + 2):
+        try:
+            reply = client.chat.completions.create(**_shaped(body, known))
+        except OpenAIError as exc:
+            quirk = _quirk_for(exc)
+            if quirk is None or quirk in known:
+                # The provider's own sentence, not the SDK's repr of the whole
+                # error body -- what reaches the page should read as English
+                # rather than as a dict someone forgot to unpack.
+                raise NamingError(_refusal(exc)[2]) from exc
+            known.add(quirk)
+            continue
+        return reply.choices[0].message.content
+    raise NamingError("The model kept refusing the request parameters.")
 
 
 def _ask_anthropic(req: NameRequest, settings: Settings) -> str | None:

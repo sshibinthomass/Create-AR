@@ -391,6 +391,131 @@ def test_azure_is_called_at_its_deployment_with_the_instructions(monkeypatch):
     assert sent["messages"][0] == {"role": "system", "content": "Name it plainly."}
 
 
+class _PickyOpenAI(_FakeOpenAI):
+    """A model that refuses max_tokens, then temperature, then answers.
+
+    Exactly what the o-series and GPT-5 do, and exactly what DeepSeek and the
+    other OpenAI-compatible servers do not -- which is why the parameters are
+    discovered from the refusal rather than from the model's name.
+    """
+
+    refuse: tuple = ()
+    calls: list = []
+
+    def create(self, **kwargs):
+        _PickyOpenAI.calls.append(dict(kwargs))
+        import openai
+        if "max_tokens" in _PickyOpenAI.refuse and "max_tokens" in kwargs:
+            raise openai.BadRequestError(
+                "Error code: 400", response=_response(), body={"error": {
+                    "message": ("Unsupported parameter: 'max_tokens' is not "
+                                "supported with this model. Use "
+                                "'max_completion_tokens' instead."),
+                    "type": "invalid_request_error",
+                    "param": "max_tokens", "code": "unsupported_parameter"}})
+        if "temperature" in _PickyOpenAI.refuse and "temperature" in kwargs:
+            raise openai.BadRequestError(
+                "Error code: 400", response=_response(), body={"error": {
+                    "message": ("Unsupported value: 'temperature' does not "
+                                "support 0.2 with this model."),
+                    "type": "invalid_request_error",
+                    "param": "temperature", "code": "unsupported_value"}})
+        return super().create(**kwargs)
+
+
+def _response():
+    import httpx
+    return httpx.Response(400, request=httpx.Request("POST", "https://example"))
+
+
+@pytest.fixture(autouse=True)
+def _forget_quirks():
+    naming._quirks.clear()
+    _PickyOpenAI.calls = []
+    _PickyOpenAI.refuse = ()
+    yield
+    naming._quirks.clear()
+
+
+def test_a_model_that_wants_max_completion_tokens_gets_it(monkeypatch):
+    """The o-series and GPT-5 renamed the parameter; the retry finds that out."""
+    import openai
+    _PickyOpenAI.refuse = ("max_tokens",)
+    monkeypatch.setattr(openai, "OpenAI", _PickyOpenAI)
+
+    saved = settings_store.Settings(provider="openai", openai_key="oa-key",
+                                    openai_model="gpt-5")
+    got = naming.name_parts(naming.NameRequest(parts=[shot(5)], total=1), saved)
+    assert got == {5: {"name": "Idler Pulley", "details": {}}}
+
+    first, second = _PickyOpenAI.calls
+    assert "max_tokens" in first and "max_completion_tokens" not in first
+    assert "max_tokens" not in second
+    assert second["max_completion_tokens"] == first["max_tokens"]
+
+
+def test_a_model_that_also_refuses_temperature_is_asked_without_it(monkeypatch):
+    import openai
+    _PickyOpenAI.refuse = ("max_tokens", "temperature")
+    monkeypatch.setattr(openai, "OpenAI", _PickyOpenAI)
+
+    saved = settings_store.Settings(provider="openai", openai_key="oa-key",
+                                    openai_model="o3")
+    naming.name_parts(naming.NameRequest(parts=[shot(5)], total=1), saved)
+    last = _PickyOpenAI.calls[-1]
+    assert "temperature" not in last
+    assert "max_completion_tokens" in last
+
+
+def test_what_the_model_refused_is_remembered_for_the_next_chunk(monkeypatch):
+    """A naming run is many requests. Rediscovering this on each would double
+    every one of them."""
+    import openai
+    _PickyOpenAI.refuse = ("max_tokens",)
+    monkeypatch.setattr(openai, "OpenAI", _PickyOpenAI)
+
+    saved = settings_store.Settings(provider="openai", openai_key="oa-key",
+                                    openai_model="gpt-5")
+    for _ in range(3):
+        naming.name_parts(naming.NameRequest(parts=[shot(5)], total=1), saved)
+    # One wasted call on the first chunk, and none after it.
+    assert len(_PickyOpenAI.calls) == 4
+
+
+def test_a_model_that_takes_max_tokens_is_left_alone(monkeypatch):
+    """DeepSeek and the other compatible servers only know max_tokens."""
+    import openai
+    monkeypatch.setattr(openai, "OpenAI", _PickyOpenAI)
+
+    saved = settings_store.Settings(
+        provider="compatible", compatible_url="https://api.deepseek.com",
+        compatible_model="deepseek-chat", compatible_key="ds-key")
+    naming.name_parts(naming.NameRequest(parts=[shot(5)], total=1), saved)
+
+    only = _PickyOpenAI.calls[0]
+    assert len(_PickyOpenAI.calls) == 1
+    assert only["max_tokens"] and only["temperature"] == 0.2
+    assert "max_completion_tokens" not in only
+
+
+def test_a_refusal_that_is_not_about_a_parameter_is_reported(monkeypatch):
+    """Retrying a bad key or a missing model would only fail again, slower."""
+    import openai
+
+    class _Broken(_FakeOpenAI):
+        def create(self, **kwargs):
+            raise openai.BadRequestError(
+                "Error code: 400", response=_response(), body={"error": {
+                    "message": "The model `nope` does not exist.",
+                    "code": "model_not_found", "param": None}})
+
+    monkeypatch.setattr(openai, "OpenAI", _Broken)
+    saved = settings_store.Settings(provider="openai", openai_key="oa-key",
+                                    openai_model="nope")
+    with pytest.raises(naming.NamingError, match="does not exist"):
+        naming.name_parts(naming.NameRequest(parts=[shot(5)], total=1), saved)
+
+
 def test_openai_proper_uses_its_own_base_url(monkeypatch):
     import openai
     monkeypatch.setattr(openai, "OpenAI", _FakeOpenAI)
