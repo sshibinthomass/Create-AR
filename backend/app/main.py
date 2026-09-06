@@ -15,6 +15,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, ValidationError, field_validator, model_validator
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from . import config, formats, naming, parts_doc
 from . import settings as settings_store
@@ -517,7 +518,26 @@ def preview(job_id: str) -> FileResponse:
     return FileResponse(path, media_type="model/gltf-binary")
 
 
+class _Spa(StaticFiles):
+    """Static files with a fallback to index.html.
+
+    Each view of the UI has its own address (/convert, /analysis, /settings).
+    Those paths are no file on disk, so a reload or a shared link would 404
+    without this; the SPA reads the path itself and shows the right view.
+    Only extension-less paths outside /api fall back: a missing asset must
+    still 404 rather than hand a page of HTML to a <script> tag.
+    """
+
+    async def get_response(self, path: str, scope):
+        try:
+            return await super().get_response(path, scope)
+        except StarletteHTTPException as exc:
+            if exc.status_code != 404 or path.startswith("api") or Path(path).suffix:
+                raise
+            return await super().get_response("index.html", scope)
+
+
 # Serve the built SPA when it exists, so `uvicorn app.main:app` is the whole app.
 _dist = config.REPO_DIR / "frontend" / "dist"
 if _dist.is_dir():
-    app.mount("/", StaticFiles(directory=str(_dist), html=True), name="spa")
+    app.mount("/", _Spa(directory=str(_dist), html=True), name="spa")

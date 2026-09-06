@@ -6,12 +6,11 @@ import {
 import ConvertView from './views/ConvertView'
 import AnalysisView from './views/AnalysisView'
 import SettingsView from './views/SettingsView'
+import { navigate, RouteLink, useRoute, type Route } from './router'
 
 // Settings is a view like the others, but it is not a step in the work, so
 // it is reached from the gear in the corner rather than from the tab bar.
-type Tab = 'convert' | 'analysis' | 'settings'
-
-const TABS: { id: Tab; label: string }[] = [
+const TABS: { id: Route; label: string }[] = [
   { id: 'convert', label: 'Convert' },
   { id: 'analysis', label: 'Analysis' },
 ]
@@ -21,7 +20,7 @@ export default function App() {
   const [caps, setCaps] = useState<Capabilities | null>(null)
   const [settings, setSettings] = useState<NamerSettings | null>(null)
   const [bootError, setBootError] = useState<string | null>(null)
-  const [tab, setTab] = useState<Tab>('convert')
+  const tab = useRoute()
 
   useEffect(() => {
     Promise.all([getHealth(), getCapabilities()])
@@ -45,13 +44,9 @@ export default function App() {
 
         <nav className="tabs">
           {TABS.map((t) => (
-            <button
-              key={t.id}
-              className={`tab${tab === t.id ? ' sel' : ''}`}
-              onClick={() => setTab(t.id)}
-            >
+            <RouteLink key={t.id} to={t.id} className={`tab${tab === t.id ? ' sel' : ''}`}>
               {t.label}
-            </button>
+            </RouteLink>
           ))}
         </nav>
 
@@ -65,18 +60,18 @@ export default function App() {
         {health?.cadSupport && (
           <span className="badge ok"><i className="dot" />STEP / IGES ready</span>
         )}
-        <button
+        <RouteLink
+          to={tab === 'settings' ? 'convert' : 'settings'}
           className={`gear${tab === 'settings' ? ' sel' : ''}`}
           title="Settings"
           aria-label="Settings"
-          onClick={() => setTab(tab === 'settings' ? 'convert' : 'settings')}
         >
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor"
                strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round">
             <circle cx="12" cy="12" r="3.2" />
             <path d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.9-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1A1.7 1.7 0 0 0 8.9 19a1.7 1.7 0 0 0-1.9.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.9 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1A1.7 1.7 0 0 0 5 8.9a1.7 1.7 0 0 0-.3-1.9l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.9.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.9-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.9V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z" />
           </svg>
-        </button>
+        </RouteLink>
       </header>
 
       {bootError && (
@@ -96,7 +91,7 @@ export default function App() {
           caps={caps}
           active={tab === 'analysis'}
           settings={settings}
-          onOpenSettings={() => setTab('settings')}
+          onOpenSettings={() => navigate('settings')}
         />
       </div>
       <div className="view" hidden={tab !== 'settings'}>
