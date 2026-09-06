@@ -560,3 +560,147 @@ input[type='range'] { width: 110px; accent-color: var(--accent); }
   font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 11px;
 }
 .entry-go { flex: none; color: var(--accent); font-size: 11px; }
+
+/* ---------- part naming ---------- */
+
+.name-bar {
+  display: flex; align-items: center; gap: 8px;
+  padding: 12px 16px; border-bottom: 1px solid var(--line-soft);
+}
+.name-go { flex: 1; padding: 8px 12px; font-size: 13px; }
+.name-prog { padding: 0 16px 12px; }
+.name-prog .note { margin-top: 0; }
+
+/* ---------- settings page ---------- */
+
+.settings { padding: 20px 24px; }
+.settings > .card { max-width: 620px; margin: 0 auto; }
+
+.gear {
+  display: flex; align-items: center; justify-content: center;
+  width: 30px; height: 30px; flex: none;
+  background: var(--panel-2); border: 1px solid var(--line);
+  border-radius: 8px; color: var(--muted);
+}
+.gear:hover { color: var(--text); border-color: #38405a; }
+.gear.sel { color: var(--accent); border-color: var(--accent); background: var(--accent-soft); }
+
+.providers { display: grid; gap: 7px; margin-bottom: 16px; }
+.provider {
+  display: flex; flex-direction: column; gap: 2px; text-align: left;
+  padding: 9px 11px; border-radius: 9px;
+  background: var(--panel-2); border: 1px solid var(--line-soft); color: var(--muted);
+}
+.provider:hover { border-color: #38405a; }
+.provider.sel { border-color: var(--accent); background: var(--accent-soft); }
+.provider-name { display: flex; align-items: center; gap: 7px; font-size: 13px; font-weight: 600; color: var(--text); }
+.provider.sel .provider-name { color: var(--accent); }
+.provider-note { font-size: 11px; color: var(--dim); }
+.provider-key {
+  width: 6px; height: 6px; border-radius: 50%; flex: none;
+  background: var(--ok); box-shadow: 0 0 7px rgba(62, 207, 142, .6);
+}
+
+.field { margin-bottom: 12px; }
+.field label { display: block; margin-bottom: 5px; color: var(--muted); font-size: 13px; }
+.field input, .prompt {
+  width: 100%; background: var(--panel-2); border: 1px solid var(--line);
+  color: var(--text); border-radius: 7px; padding: 7px 9px; font: inherit;
+}
+.field input:focus, .prompt:focus { outline: none; border-color: var(--accent); }
+.field-side {
+  display: inline-block; margin-top: 5px; padding: 0;
+  background: none; border: none; font-size: 11px; color: var(--dim);
+}
+button.field-side { text-decoration: underline; }
+button.field-side:hover { color: var(--err); }
+.field-side.warn { color: var(--warn); }
+
+.prompt {
+  display: block; resize: vertical; line-height: 1.55; font-size: 12px;
+  font-family: ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+}
+
+/* An inline "Settings" link inside a note. */
+.link {
+  padding: 0; background: none; border: none;
+  color: var(--accent); font: inherit; text-decoration: underline;
+}
+
+/* ---------- export type ---------- */
+
+.wrap-pick { gap: 0; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
+.wrap-opt {
+  padding: 5px 11px; font-size: 12px;
+  background: var(--panel-2); border: none; color: var(--muted);
+}
+.wrap-opt + .wrap-opt { border-left: 1px solid var(--line); }
+.wrap-opt:hover { color: var(--text); }
+.wrap-opt.sel { background: var(--accent-soft); color: var(--accent); font-weight: 600; }
+
+.note code {
+  font: 11px/1.4 ui-monospace, Menlo, Consolas, monospace;
+  background: var(--panel); padding: 1px 5px; border-radius: 4px; color: var(--text);
+}
+
+/* ---------- the selected part, over the viewer ---------- */
+
+.viewer-card { position: relative; }
+
+.part-card {
+  /* Below the gizmo bar, which owns the top-left corner, and stopping short of
+     the hint line along the bottom. */
+  position: absolute; z-index: 4; top: 58px; left: 12px;
+  width: min(300px, calc(100% - 24px)); max-height: calc(100% - 106px);
+  display: flex; flex-direction: column;
+  border-radius: 10px; border: 1px solid var(--line);
+  background: rgba(18, 21, 29, .93);
+  backdrop-filter: blur(6px);
+  box-shadow: 0 10px 30px rgba(0, 0, 0, .45);
+}
+.part-card-head {
+  display: flex; align-items: flex-start; gap: 8px;
+  padding: 10px 12px; border-bottom: 1px solid var(--line-soft);
+}
+.part-card-head h3 {
+  margin: 0; flex: 1; min-width: 0; font-size: 13px; font-weight: 650;
+  color: var(--accent); overflow-wrap: anywhere;
+}
+.part-card-x {
+  flex: none; background: none; border: none; color: var(--dim);
+  font-size: 17px; line-height: 1; padding: 0 2px;
+}
+.part-card-x:hover { color: var(--text); }
+.part-card-empty { margin: 0; padding: 11px 12px; font-size: 12px; color: var(--dim); }
+
+.part-facts { margin: 0; padding: 10px 12px; overflow-y: auto; }
+.part-facts > div + div { margin-top: 10px; }
+.part-facts dt {
+  font-size: 10px; text-transform: uppercase; letter-spacing: .05em;
+  color: var(--dim); margin-bottom: 2px;
+}
+.part-facts dd { margin: 0; font-size: 12px; line-height: 1.5; color: var(--text); }
+
+/* ---------- the selected part, on its own ---------- */
+
+.part-shot {
+  position: absolute; z-index: 4; top: 58px; right: 12px;
+  width: 168px;
+  border-radius: 10px; border: 1px solid var(--line);
+  background: rgba(18, 21, 29, .93);
+  backdrop-filter: blur(6px);
+  box-shadow: 0 10px 30px rgba(0, 0, 0, .45);
+  overflow: hidden;
+}
+.part-shot-frame {
+  position: relative; aspect-ratio: 1;
+  display: grid; place-items: center;
+  background: #5a6172;   /* the backdrop the render is shot against */
+}
+.part-shot-frame img { display: block; width: 100%; height: 100%; }
+.part-shot-wait { font-size: 11px; color: rgba(255, 255, 255, .7); }
+.part-shot-cap {
+  padding: 6px 9px; font-size: 10px; letter-spacing: .05em;
+  text-transform: uppercase; color: var(--dim);
+  border-top: 1px solid var(--line-soft);
+}

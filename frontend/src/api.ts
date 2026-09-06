@@ -33,6 +33,31 @@ export interface Stats {
   dimensions: [number, number, number] | null
 }
 
+/**
+ * What a part is, beyond its name.
+ *
+ * The labels are the model's own choice, not a fixed schema: what is worth
+ * saying about a bearing is not what is worth saying about a wiring loom. Both
+ * the viewer and the exported document just walk whatever came back.
+ */
+export type PartDetails = Record<string, string>
+
+export interface PartsDocEntry {
+  index: number
+  originalName: string
+  name: string
+  details: PartDetails
+}
+
+/** The parts.json written beside a model, and read back out of a bundle. */
+export interface PartsDoc {
+  format: string
+  version: number
+  generatedAt: string
+  model: { file?: string; sourceFile?: string; parts?: number }
+  parts: PartsDocEntry[]
+}
+
 export type JobStatus = 'queued' | 'running' | 'done' | 'error'
 
 export interface Job {
@@ -53,6 +78,8 @@ export interface Job {
   resultStats: Stats | null
   archiveEntries: string[]
   archiveEntry: string | null
+  /** Present when the upload was a bundle this app had written. */
+  partDoc: PartsDoc | null
   hasPreview: boolean
   log: string[]
 }
@@ -119,6 +146,9 @@ export interface ConvertOptions {
   renames?: Record<string, string>
   /** Part name -> the move, rotation, scale and material to apply to it. */
   edits?: Record<string, PartEdit>
+  /** Write parts.json beside the model and zip the two together. */
+  bundle?: boolean
+  part_details?: PartsDocEntry[]
 }
 
 export const DEFAULT_OPTIONS: ConvertOptions = {
@@ -223,3 +253,110 @@ const COUNT = new Intl.NumberFormat('en-US')
 
 export const formatCount = (n: number | null | undefined): string =>
   n == null ? '--' : COUNT.format(n)
+
+/* ---------- part naming ---------- */
+
+/**
+ * The naming settings, as the browser sees them.
+ *
+ * Every API key is deliberately absent: the server never sends one back, only
+ * which providers it holds a key for. Saving with a key field empty therefore
+ * means "keep the one you have", which is why forgetting a key is its own
+ * request.
+ */
+export type Provider = 'azure' | 'openai' | 'anthropic' | 'compatible'
+
+export interface NamerSettings {
+  provider: Provider
+
+  azure_endpoint: string
+  azure_deployment: string
+  azure_api_version: string
+
+  openai_model: string
+
+  anthropic_model: string
+
+  /** Any endpoint speaking the OpenAI chat-completions API. */
+  compatible_url: string
+  compatible_model: string
+
+  /** 'single' sends one part per request, 'batch' sends `batch_size` of them. */
+  mode: 'single' | 'batch'
+  batch_size: number
+  /** Requests the browser keeps in flight at once. */
+  concurrency: number
+  /** Send the second picture: the part highlighted in the whole assembly. */
+  context_shot: boolean
+  /** Ask what each part is as well as what to call it. */
+  describe: boolean
+  instructions: string
+  describe_instructions: string
+
+  /** Which providers the server is holding a key for. */
+  keys: Record<Provider, boolean>
+  /** Whether the *selected* provider has everything it needs. */
+  configured: boolean
+}
+
+export const getSettings = () => fetch('/api/settings').then(json<NamerSettings>)
+
+/**
+ * Save the settings.
+ *
+ * `keys` carries only the providers whose key the user actually typed; the rest
+ * are left as the server has them. `forget` names one provider whose stored key
+ * should be dropped.
+ */
+export function saveSettings(
+  settings: NamerSettings,
+  keys: Partial<Record<Provider, string>>,
+  forget?: Provider,
+): Promise<NamerSettings> {
+  const body = {
+    ...settings,
+    azure_key: keys.azure ?? '',
+    openai_key: keys.openai ?? '',
+    anthropic_key: keys.anthropic ?? '',
+    compatible_key: keys.compatible ?? '',
+  }
+  return fetch(`/api/settings?clear_key=${forget ?? ''}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  }).then(json<NamerSettings>)
+}
+
+/** One part's renders, on the way to the model. Images are base64 JPEG. */
+export interface PartShotPayload {
+  index: number
+  name: string
+  isolated: string
+  context: string
+}
+
+/**
+ * Name one chunk of parts -- a single part, or a batch of them.
+ *
+ * `taken` is the names already handed out for this model, so the reply can
+ * avoid repeating them; with several requests in flight it is a snapshot, and
+ * the model is asked to treat it as a hint rather than a rule.
+ */
+export interface NamedPart {
+  index: number
+  name: string
+  details: PartDetails
+}
+
+export function nameParts(
+  parts: PartShotPayload[],
+  total: number,
+  taken: string[],
+  describe: boolean,
+): Promise<{ names: NamedPart[] }> {
+  return fetch('/api/name-parts', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ parts, total, taken, describe }),
+  }).then(json<{ names: NamedPart[] }>)
+}

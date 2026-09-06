@@ -42,6 +42,8 @@ class Job:
     result_stats: dict | None = None
     archive_entries: list[str] = field(default_factory=list)
     archive_entry: str | None = None
+    # Present when the upload was a bundle this app had written.
+    part_doc: dict | None = None
 
     def public(self) -> dict:
         return {
@@ -62,6 +64,7 @@ class Job:
             "resultStats": self.result_stats,
             "archiveEntries": self.archive_entries,
             "archiveEntry": self.archive_entry,
+            "partDoc": self.part_doc,
             "hasPreview": self.status == "done" and self.preview_path().exists(),
             "log": self.log[-MAX_LOG_LINES:],
         }
@@ -168,6 +171,7 @@ class JobStore:
             warnings=result.warnings,
             archive_entries=result.archive_entries,
             archive_entry=result.archive_entry,
+            part_doc=result.part_doc,
         )
 
     def sweep(self) -> int:
