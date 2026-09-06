@@ -16,7 +16,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, ValidationError, field_validator, model_validator
 
-from . import config, formats, naming, parts_doc
+from . import agent, config, formats, naming, parts_doc
 from . import settings as settings_store
 from .jobs import new_job_dir, store
 
@@ -385,6 +385,15 @@ def write_settings(incoming: settings_store.Settings, clear_key: str = "") -> di
 @app.post("/api/name-parts")
 def name_parts(request: naming.NameRequest) -> dict:
     """Name one chunk of rendered parts. See naming.py for why it is a chunk."""
+    try:
+        named = naming.name_parts(request, _configured())
+    except naming.NamingError as exc:
+        raise HTTPException(502, str(exc)) from exc
+    return {"names": [{"index": i, **found} for i, found in named.items()]}
+
+
+def _configured() -> settings_store.Settings:
+    """The settings, or the sentence that says what is still missing."""
     settings = settings_store.load()
     if not settings.configured():
         raise HTTPException(
@@ -392,11 +401,41 @@ def name_parts(request: naming.NameRequest) -> dict:
             f"The {settings.provider} provider is not set up yet -- open "
             "Settings and fill in what it needs.",
         )
+    return settings
+
+
+@app.post("/api/agent/start")
+def agent_start(request: agent.StartRequest) -> dict:
+    """Open an agent run from the browser's survey of the model.
+
+    Nothing is rendered yet: the reply says which pictures to take, and the
+    browser posts them back to /api/agent/step. See agent.py for why the loop
+    is split across the two.
+    """
     try:
-        named = naming.name_parts(request, settings)
+        return agent.start(request, _configured()).model_dump()
+    except (agent.AgentError, naming.NamingError) as exc:
+        raise HTTPException(502, str(exc)) from exc
+
+
+@app.post("/api/agent/step")
+def agent_step(request: agent.StepRequest) -> dict:
+    """One turn: what the browser saw, and what should happen next."""
+    try:
+        return agent.step(request, _configured()).model_dump()
+    except agent.AgentError as exc:
+        # An expired session is the user's to fix by starting again, not a
+        # failure of the provider.
+        raise HTTPException(409 if "expired" in str(exc) else 502, str(exc)) from exc
     except naming.NamingError as exc:
         raise HTTPException(502, str(exc)) from exc
-    return {"names": [{"index": i, **found} for i, found in named.items()]}
+
+
+@app.delete("/api/agent/{session_id}")
+def agent_stop(session_id: str) -> dict:
+    """Drop a run the browser has abandoned, so its survey is not held open."""
+    agent.close(session_id)
+    return {"ok": True}
 
 
 @app.post("/api/convert")

@@ -21,7 +21,7 @@ import {
 } from 'three'
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js'
 import { RoomEnvironment } from 'three/examples/jsm/environments/RoomEnvironment.js'
-import { isRestyled, type PartEdit } from './api'
+import { isRestyled, type PartEdit, type PartFacts, type ShotSpec } from './api'
 import { poseEdited, restyleNode } from './partEdit'
 import { fileNames, partNodes, type NameSource } from './partGraph'
 
@@ -52,6 +52,59 @@ const DOLLY_RANGE: [number, number] = [0.35, 4]
 const TURN_PER_PX = 0.008
 /** Wheel notches are exponential, so zooming in and back out lands where it was. */
 const ZOOM_PER_NOTCH = 0.0012
+/**
+ * How far back a neighbourhood shot is framed, as a multiple of the part's box.
+ *
+ * Three is the number that earns its keep: enough of the surroundings to show
+ * what a part fastens to and how big it is next to them, close enough that a
+ * 2cm bolt is still a recognisable object rather than a speck. The agent may
+ * override it per shot.
+ */
+const NEIGHBOURHOOD = 3
+/** Neighbours in a neighbourhood shot: solid, and clearly not the subject. */
+const NEIGHBOUR = 0x969ba8
+
+/**
+ * How far above the horizon the whole-model survey views are taken from.
+ *
+ * Low enough that a front still reads as a front, high enough to show what the
+ * thing stands on.
+ */
+const SURVEY_PITCH = 18
+
+/**
+ * Where the camera sits for the survey view at `yaw`, in *world* axes.
+ *
+ * Deliberately not the resting three-quarter angle the part shots use. The
+ * survey is what the assembly's facing is read off, and from an oblique camera
+ * "toward the viewer" is two axes at once -- asked which way a chair faced from
+ * a three-quarter view, a model answered -Z, then +X, and neither was right.
+ * Squared onto the axes, yaw 0 is the +Z side, 90 is +X, 180 is -Z and 270 is
+ * -X, so the question has one answer and the prompt can simply say which.
+ */
+function axisDir(yaw = 0): Vector3 {
+  return new Vector3().setFromSphericalCoords(
+    1, Math.PI / 2 - MathUtils.degToRad(SURVEY_PITCH), MathUtils.degToRad(yaw),
+  )
+}
+
+/** The camera direction for a turn of `yaw` and `pitch` off the resting angle. */
+function dirFor(yaw = 0, pitch = 0): Vector3 {
+  return new Vector3().setFromSphericalCoords(
+    1,
+    MathUtils.clamp(REST.phi + MathUtils.degToRad(pitch), PITCH_LIMIT, Math.PI - PITCH_LIMIT),
+    REST.theta + MathUtils.degToRad(yaw),
+  )
+}
+
+/** A box centred on `box` but `grow` times the size, for framing further back. */
+function grown(box: Box3, grow: number): Box3 {
+  const centre = box.getCenter(new Vector3())
+  const reach = Math.max(box.getSize(new Vector3()).length() / 2, 1e-6) * grow
+  return new Box3(
+    centre.clone().subScalar(reach), centre.clone().addScalar(reach),
+  )
+}
 
 /**
  * Point the camera at a box and back off far enough to hold all of it.
@@ -111,9 +164,33 @@ export interface PartStudio {
    * framing follows the part, so a move is invisible here and a rotation,
    * a non-uniform scale and a material change are not.
    */
-  isolated(index: number, edit?: PartEdit): string
+  isolated(index: number, edit?: PartEdit, yaw?: number): string
   /** The whole assembly, that part lit orange and the rest ghosted. */
-  inContext(index: number): string
+  inContext(index: number, yaw?: number): string
+  /**
+   * One part lit orange, its neighbours solid around it, framed on the part.
+   *
+   * The view that actually identifies a component. A part alone has no scale
+   * and no neighbours -- a telescoping cylinder is a gas lift or a hydraulic
+   * ram depending entirely on what it stands between -- and the ghosted
+   * whole-model shot puts a 2cm bolt behind a 16% veil at a hundredth of the
+   * frame. This sits between the two.
+   */
+  neighbourhood(index: number, yaw?: number, grow?: number): string
+  /** Only that part drawn, but framed as the whole model is: its true size. */
+  scaled(index: number, yaw?: number): string
+  /** The whole assembly as it is, from any angle. */
+  everything(yaw?: number): string
+  /** Take whichever shot a spec asks for. */
+  take(spec: ShotSpec): string
+  /**
+   * Every part measured -- size, position, complexity, material.
+   *
+   * The free half of the evidence, and the half a picture cannot give: it is
+   * what tells a 2cm fastener from a 50cm panel when both fill the frame, and
+   * what finds the single-triangle fragments that no view can show at all.
+   */
+  survey(): { extents: number[]; base: number[]; parts: PartFacts[] }
   /**
    * Put one part on the canvas and leave it there, framed from the resting
    * angle. Unlike `isolated` the pose and materials stay applied, because the
@@ -176,7 +253,30 @@ export async function openStudio(url: string, size = SIZE): Promise<PartStudio |
   // costs, not the shot, so the two passes are kept apart where possible.
   let ghost: MeshStandardMaterial | null = null
   let lit: MeshStandardMaterial | null = null
+  let plain: MeshStandardMaterial | null = null
   let original: Map<Mesh, Material | Material[]> | null = null
+
+  const litMaterial = () => new MeshStandardMaterial({
+    color: 0xff7a1a, roughness: 0.45, emissive: 0xff7a1a, emissiveIntensity: 0.3,
+  })
+
+  /** Paint some subtrees, handing back what they were wearing. */
+  const paint = (roots: Object3D[], material: Material) => {
+    const was = new Map<Mesh, Material | Material[]>()
+    for (const root of roots) {
+      root.traverse((child) => {
+        const mesh = child as Mesh
+        if (!mesh.isMesh) return
+        was.set(mesh, mesh.material)
+        mesh.material = material
+      })
+    }
+    return was
+  }
+
+  const restore = (was: Map<Mesh, Material | Material[]>) => {
+    for (const [mesh, material] of was) mesh.material = material
+  }
 
   const ghosted = (on: boolean) => {
     if (on === (original !== null)) return
@@ -271,19 +371,124 @@ export async function openStudio(url: string, size = SIZE): Promise<PartStudio |
     renderer.render(stage, camera)
   }
 
-  return {
+  // Named rather than returned straight, so `take` can dispatch to its
+  // siblings: `this` inside an object literal is not the interface it satisfies.
+  const studio: PartStudio = {
     names: nodes.map((node, i) => named.get(node) ?? node.name ?? `Part ${i + 1}`),
     canvas,
 
-    isolated(index, edit) {
+    isolated(index, edit, yaw = 0) {
       // A still shot is taken from the resting angle, never through whatever
       // the live view happens to be turned to.
       drop()
       const held = stageOne(index, edit)
-      frame(camera, held.box)
+      frame(camera, held.box, dirFor(yaw))
       const shot = shoot()
       held.undo()
       return shot
+    },
+
+    neighbourhood(index, yaw = 0, grow = NEIGHBOURHOOD) {
+      drop()
+      ghosted(false)
+      for (const node of nodes) node.visible = true
+      // Neighbours are repainted flat rather than left in their own materials:
+      // a dark part against a dark part reads as one object, and the point of
+      // this view is the boundary between them.
+      plain ??= new MeshStandardMaterial({ color: NEIGHBOUR, roughness: 0.75 })
+      lit ??= litMaterial()
+      const swapped = paint(nodes, plain)
+      const marked = paint([nodes[index]], lit)
+      // Backing off three times a castor's box shows the leg it is on; backing
+      // off three times the backrest's would put the whole chair in a corner of
+      // the frame. So the framing never goes wider than the model itself.
+      const around = grown(boxes[index], Math.max(1, grow))
+      const tooFar = around.getSize(new Vector3()).length()
+        > whole.getSize(new Vector3()).length()
+      frame(camera, tooFar ? whole : around, dirFor(yaw))
+      const shot = shoot()
+      restore(swapped)
+      restore(marked)
+      return shot
+    },
+
+    scaled(index, yaw = 0) {
+      drop()
+      ghosted(false)
+      for (let j = 0; j < nodes.length; j++) nodes[j].visible = j === index
+      lit ??= litMaterial()
+      const marked = paint([nodes[index]], lit)
+      // Framed on the whole model, so how much of the frame the part fills is
+      // exactly how much of the model it is.
+      frame(camera, whole, dirFor(yaw))
+      const shot = shoot()
+      restore(marked)
+      for (const node of nodes) node.visible = true
+      return shot
+    },
+
+    everything(yaw = 0) {
+      drop()
+      ghosted(false)
+      for (const node of nodes) node.visible = true
+      frame(camera, whole, axisDir(yaw))
+      return shoot()
+    },
+
+    take(spec) {
+      const at = spec.index
+      if (spec.view === 'whole' || at < 0 || at >= nodes.length) {
+        return studio.everything(spec.yaw)
+      }
+      if (spec.view === 'isolated') return studio.isolated(at, undefined, spec.yaw)
+      if (spec.view === 'context') return studio.inContext(at, spec.yaw)
+      if (spec.view === 'scaled') return studio.scaled(at, spec.yaw)
+      return studio.neighbourhood(at, spec.yaw, spec.grow)
+    },
+
+    survey() {
+      const size = whole.getSize(new Vector3())
+      return {
+        extents: [size.x, size.y, size.z],
+        base: [whole.min.x, whole.min.y, whole.min.z],
+        parts: nodes.map((node, index) => {
+          const box = boxes[index]
+          const centre = box.getCenter(new Vector3())
+          const span = box.getSize(new Vector3())
+          let vertices = 0
+          let faces = 0
+          let radius = 0
+          let material = ''
+          node.traverse((child) => {
+            const mesh = child as Mesh
+            if (!mesh.isMesh || !mesh.geometry) return
+            const position = mesh.geometry.attributes?.position
+            vertices += position?.count ?? 0
+            faces += (mesh.geometry.index?.count ?? position?.count ?? 0) / 3
+            // The geometry's own bounding sphere, in the mesh's local space.
+            // Distances from a point set's centre do not change when the set is
+            // turned, so unlike the box this survives the same component being
+            // rotated onto another mounting -- which is what makes it usable
+            // for spotting repeats.
+            mesh.geometry.computeBoundingSphere()
+            const local = mesh.geometry.boundingSphere?.radius ?? 0
+            const scale = mesh.getWorldScale(new Vector3())
+            radius = Math.max(radius, local * Math.max(scale.x, scale.y, scale.z))
+            const first = [mesh.material].flat()[0]
+            if (!material && first?.name) material = first.name
+          })
+          return {
+            index,
+            name: named.get(node) ?? node.name ?? `Part ${index + 1}`,
+            vertices,
+            faces: Math.round(faces),
+            size: [span.x, span.y, span.z],
+            centre: [centre.x, centre.y, centre.z],
+            radius,
+            material,
+          }
+        }),
+      }
     },
 
     show(index, edit) {
@@ -316,25 +521,19 @@ export async function openStudio(url: string, size = SIZE): Promise<PartStudio |
       look()
     },
 
-    inContext(index) {
+    inContext(index, yaw = 0) {
       drop()
       ghosted(true)
       for (const node of nodes) node.visible = true
-      lit ??= new MeshStandardMaterial({
-        color: 0xff7a1a, roughness: 0.45, emissive: 0xff7a1a, emissiveIntensity: 0.3,
-      })
-      const marked: Mesh[] = []
-      nodes[index].traverse((child) => {
-        const mesh = child as Mesh
-        if (!mesh.isMesh) return
-        marked.push(mesh)
-        mesh.material = lit!
-      })
+      lit ??= litMaterial()
+      // What the marked meshes are wearing here is the ghost, so putting that
+      // back is what leaves the scene ready for the next context shot.
+      const marked = paint([nodes[index]], lit)
       // One framing for every context shot: the same view each time is what
       // lets the model compare where two parts sit.
-      frame(camera, whole)
+      frame(camera, whole, dirFor(yaw))
       const shot = shoot()
-      for (const mesh of marked) mesh.material = ghost!
+      restore(marked)
       return shot
     },
 
@@ -345,12 +544,14 @@ export async function openStudio(url: string, size = SIZE): Promise<PartStudio |
       release(gltf.scene)
       ghost?.dispose()
       lit?.dispose()
+      plain?.dispose()
       environment.texture.dispose()
       pmrem.dispose()
       renderer.dispose()
       renderer.forceContextLoss()
     },
   }
+  return studio
 }
 
 /**

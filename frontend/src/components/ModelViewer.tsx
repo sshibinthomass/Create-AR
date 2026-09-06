@@ -51,6 +51,29 @@ interface Assembly {
   parts: Part[]
   /** How far a part may usefully be nudged, in the space `move` is applied in. */
   reach: number
+  /**
+   * Every part's longest side, and the model's, in world units.
+   *
+   * What the size floor in the parts list is measured against. World space
+   * rather than parent space so the numbers match the ones the namer sends the
+   * model, which come from the same boxes.
+   */
+  scale: PartSizes
+}
+
+export interface PartSizes {
+  /** The model's longest side. */
+  model: number
+  /** Each part's longest side, in the same units. */
+  parts: number[]
+  /**
+   * Each part's face count.
+   *
+   * Here so the list can show which parts the namer will leave alone before a
+   * single request is spent: one face means no enclosed volume, which the agent
+   * always sets aside as a modelling artefact whatever the size floor says.
+   */
+  faces: number[]
 }
 
 interface Part {
@@ -128,7 +151,7 @@ function shelfSlots(sizes: Vector3[], extent: number): Vector3[] {
 function buildParts(scene: Object3D, names: Map<Object3D, string>): Assembly {
   scene.updateWorldMatrix(false, true)
   const nodes = partNodes(scene)
-  if (!nodes.length) return { parts: [], reach: 1 }
+  if (!nodes.length) return { parts: [], reach: 1, scale: { model: 1, parts: [], faces: [] } }
 
   const boxes = nodes.map((n) => new Box3().setFromObject(n))
   const whole = boxes.reduce((acc, b) => acc.union(b), new Box3())
@@ -188,7 +211,25 @@ function buildParts(scene: Object3D, names: Map<Object3D, string>): Assembly {
     }
   })
 
-  return { parts, reach: extent }
+  const longest = (v: Vector3) => Math.max(v.x, v.y, v.z)
+  return {
+    parts,
+    reach: extent,
+    scale: {
+      model: longest(whole.getSize(new Vector3())) || 1,
+      parts: boxes.map((b) => longest(b.getSize(new Vector3()))),
+      faces: nodes.map((node) => {
+        let faces = 0
+        node.traverse((child) => {
+          const mesh = child as Mesh
+          if (!mesh.isMesh || !mesh.geometry) return
+          const position = mesh.geometry.attributes?.position
+          faces += (mesh.geometry.index?.count ?? position?.count ?? 0) / 3
+        })
+        return Math.round(faces)
+      }),
+    },
+  }
 }
 
 const DEG = Math.PI / 180
@@ -375,7 +416,8 @@ function Model({
   selected: readonly string[]
   onSelect: (name: string | null, additive: boolean) => void
   onEdit?: (changes: Record<string, PartEdit>) => void
-  onParts: (names: string[], reach: number, pivot: [number, number, number]) => void
+  onParts: (names: string[], reach: number, pivot: [number, number, number],
+    scale: PartSizes) => void
   clip: Clip | null
   player: Player | null
   wholeModel: boolean
@@ -396,12 +438,15 @@ function Model({
     return { scale: k, offset: centre.multiplyScalar(-k), pivot }
   }, [scene])
 
-  const { parts, reach } = useMemo(
+  // `scale` above is the fit-to-view factor; this one is how big each part is,
+  // which is a different thing entirely -- hence the name.
+  const { parts, reach, scale: sizes } = useMemo(
     () => buildParts(scene, fileNames(parser as NameSource | undefined)),
     [scene, parser],
   )
   const names = useMemo(() => parts.map((p) => p.name), [parts])
-  useEffect(() => onParts(names, reach, pivot), [names, reach, pivot, onParts])
+  useEffect(() => onParts(names, reach, pivot, sizes),
+    [names, reach, pivot, sizes, onParts])
 
   // The model as one thing the gizmo can hold: the scene root standing in as a
   // part, at rest with no separation of its own, whose visible centre is the
@@ -704,7 +749,8 @@ interface Props {
    * with how far one may usefully be nudged in the space a move applies in,
    * and the model's centre in that space -- what it pivots on as a whole.
    */
-  onParts?: (names: string[], reach: number, pivot: [number, number, number]) => void
+  onParts?: (names: string[], reach: number, pivot: [number, number, number],
+    scale: PartSizes) => void
   /** The animation to play over the model, or none. */
   clip?: Clip | null
   /** The clock the clip plays to. */
@@ -852,9 +898,10 @@ export default function ModelViewer({
   // away the names the user has typed.
   const sink = useRef(onParts)
   sink.current = onParts
-  const report = useCallback((names: string[], reach: number, pivot: [number, number, number]) => {
+  const report = useCallback((names: string[], reach: number,
+                              pivot: [number, number, number], sizes: PartSizes) => {
     setParts(names.length)
-    sink.current?.(names, reach, pivot)
+    sink.current?.(names, reach, pivot, sizes)
   }, [])
 
   /**

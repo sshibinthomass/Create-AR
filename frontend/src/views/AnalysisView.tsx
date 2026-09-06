@@ -5,6 +5,9 @@ import {
   type PartDetails, type PartEdit, type PartsDoc,
 } from '../api'
 import { copyClip, newClip, pruneClips, reverseClip, setKey, splitPose, unpivot } from '../animation'
+import type { PartSizes } from '../components/ModelViewer'
+import AgentAsk from '../components/AgentAsk'
+import AgentReport from '../components/AgentReport'
 import AnimEditor from '../components/AnimEditor'
 import Dropzone from '../components/Dropzone'
 import PartDialog from '../components/PartDialog'
@@ -12,10 +15,21 @@ import PartEditor from '../components/PartEditor'
 import PartPreview from '../components/PartPreview'
 import Timeline from '../components/Timeline'
 import { Player } from '../player'
+import { useAgent } from '../useAgent'
 import { useConversion } from '../useConversion'
 import { useNamer } from '../useNamer'
 
 const ModelViewer = lazy(() => import('../components/ModelViewer'))
+
+/**
+ * A length in the model's own units, trimmed to something readable.
+ *
+ * No unit is printed: what a unit means here is whatever the file said, and
+ * exporters disagree -- the same chair arrives in millimetres, centimetres or
+ * metres depending on who wrote it. The model's own length is shown beside it
+ * so the number has something to be read against.
+ */
+const trim = (n: number) => (n >= 100 ? n.toFixed(0) : n >= 10 ? n.toFixed(1) : n.toFixed(2))
 
 /** Formats that carry neither per-part names nor materials. */
 const NAMELESS = new Set(['.stl', '.ply'])
@@ -59,6 +73,13 @@ export default function AnalysisView({
   // on the file's own set of parts, and deleting is undoable until you save.
   const [removed, setRemoved] = useState<string[]>([])
   const [reach, setReach] = useState(1)
+  // Every part's longest side and the model's, from the viewer. What the size
+  // floor below is measured against, and what lets the list say which parts it
+  // takes in before a single request is spent.
+  const [sizes, setSizes] = useState<PartSizes>({ model: 1, parts: [], faces: [] })
+  // Leave parts under this fraction of the model's longest side alone, as a
+  // percentage. Seeded from the saved setting; the slider decides per run.
+  const [floor, setFloor] = useState(0)
   const [selected, setSelected] = useState<string[]>([])
   // The part opened full size in its own dialog, by its name in the file.
   const [opened, setOpened] = useState<string | null>(null)
@@ -80,16 +101,20 @@ export default function AnalysisView({
   const analysis = useConversion()
   const exported = useConversion()
   const namer = useNamer()
+  const agent = useAgent()
   const clearExport = exported.setJob
 
   // A different model means a different set of parts; nothing carries over.
-  const onParts = useCallback((names: string[], span: number, centre: [number, number, number]) => {
+  const onParts = useCallback((names: string[], span: number,
+                               centre: [number, number, number], scale: PartSizes) => {
     setParts(names)
     setReach(span)
+    setSizes(scale)
     setPivot(centre)
     setRenames({})
     setDetails({})
     setEdits({})
+    agent.setReport(null)
     setRemoved([])
     setSelected([])
     setOpened(null)
@@ -99,7 +124,7 @@ export default function AnalysisView({
     setSubject('parts')
     player.stop()
     clearExport(null)
-  }, [clearExport, player])
+  }, [agent.setReport, clearExport, player])
 
   const clip = animate ? clips.find((c) => c.id === clipId) ?? null : null
   const wholeModel = clip !== null && subject === 'model'
@@ -435,19 +460,63 @@ export default function AnalysisView({
    * A name that matches the file's own is not a rename, the same rule the
    * name field itself follows.
    */
+  const fold = useCallback((
+    found: Record<string, string>, told: Record<string, PartDetails>,
+  ) => {
+    setRenames((was) => {
+      const copy = { ...was }
+      for (const [original, name] of Object.entries(found)) {
+        if (name === original) delete copy[original]
+        else copy[original] = name
+      }
+      return copy
+    })
+    if (Object.keys(told).length) setDetails((was) => ({ ...was, ...told }))
+  }, [])
+
+  // The saved setting is where the slider starts; after that the slider is the
+  // one that decides, per run, so a later settings fetch must not drag it back.
+  const seeded = useRef(false)
+  useEffect(() => {
+    if (seeded.current || !settings) return
+    seeded.current = true
+    setFloor(settings.min_part_size)
+  }, [settings])
+
+  /**
+   * Which parts the namer would leave alone as things stand.
+   *
+   * Worked out in the browser from what the viewer measured, so the list can
+   * show it as the slider moves rather than after a run has been paid for. The
+   * two reasons are kept apart because they are not the same kind of thing: an
+   * artefact has no volume and no view can identify it, while a part under the
+   * floor is a real component the user has chosen not to spend a request on.
+   */
+  const { artefacts, under } = useMemo(() => {
+    const artefacts = new Set<number>()
+    const under = new Set<number>()
+    const limit = floor > 0 ? (sizes.model * floor) / 100 : 0
+    parts.forEach((_, i) => {
+      if ((sizes.faces[i] ?? 2) <= 1) artefacts.add(i)
+      else if (limit > 0 && (sizes.parts[i] ?? Infinity) < limit) under.add(i)
+    })
+    return { artefacts, under }
+  }, [parts, sizes, floor])
+
+  const analysed = parts.length - artefacts.size - under.size
+
+  // Either namer counts as busy; the buttons and the bar do not care which.
+  const naming = namer.busy || agent.busy
+  const progressOf = namer.busy
+    ? (namer.total ? namer.done / namer.total : 0)
+    : (agent.total ? agent.done / agent.total : 0)
+
   function autoName() {
     if (!preview || !settings) return
-    namer.run(preview, parts, settings, (found, told) => {
-      setRenames((was) => {
-        const copy = { ...was }
-        for (const [original, name] of Object.entries(found)) {
-          if (name === original) delete copy[original]
-          else copy[original] = name
-        }
-        return copy
-      })
-      if (Object.keys(told).length) setDetails((was) => ({ ...was, ...told }))
-    })
+    // Both namers write back the same way; they differ in how they arrive at
+    // the answers. See useAgent.ts and backend/app/agent.py for the difference.
+    if (settings.agent) agent.run(preview, parts, floor, fold)
+    else namer.run(preview, parts, settings, fold)
   }
 
   /** Every part, as the document records it: its old name, its new one, and what it is.
@@ -592,15 +661,22 @@ export default function AnalysisView({
             <div className="name-bar">
               <button
                 className="go name-go"
-                disabled={!preview || !settings?.configured || namer.busy || analysis.busy}
+                disabled={!preview || !settings?.configured || naming || analysis.busy}
                 onClick={autoName}
               >
                 {namer.busy
                   ? `${namer.step}… ${namer.done}/${namer.total}`
-                  : 'Name parts with AI'}
+                  : agent.busy
+                    ? `${agent.note}… ${agent.done}/${agent.total}`
+                    : settings?.agent ? 'Name parts with the agent' : 'Name parts with AI'}
               </button>
-              {namer.busy ? (
-                <button className="head-reset" onClick={namer.stop}>Stop</button>
+              {naming ? (
+                <button
+                  className="head-reset"
+                  onClick={settings?.agent ? agent.stop : namer.stop}
+                >
+                  Stop
+                </button>
               ) : (
                 <button
                   className="head-reset"
@@ -612,15 +688,70 @@ export default function AnalysisView({
               )}
             </div>
 
-            {namer.busy && (
-              <div className="name-prog">
-                <div className={`bar${namer.total ? '' : ' indet'}`}>
-                  <i style={{ width: `${namer.total ? (namer.done / namer.total) * 100 : 0}%` }} />
+            {settings?.agent && parts.length > 1 && (
+              <div className="size-floor">
+                <div className="size-floor-row">
+                  <label htmlFor="pf-floor">Skip parts under</label>
+                  <input
+                    id="pf-floor" type="range" min={0} max={10} step={0.25}
+                    value={floor} disabled={naming}
+                    onChange={(e) => setFloor(Number(e.target.value))}
+                  />
+                  <output htmlFor="pf-floor">
+                    {floor === 0 ? 'nothing' : `${floor}%`}
+                  </output>
+                </div>
+                <div className="size-floor-read">
+                  {floor > 0 && (
+                    <>
+                      Under {trim((sizes.model * floor) / 100)} on the longest
+                      side, where the whole model is {trim(sizes.model)}.{' '}
+                    </>
+                  )}
+                  <strong>{analysed}</strong> of {parts.length} parts analysed
+                  {under.size > 0 && `, ${under.size} left alone`}
+                  {artefacts.size > 0
+                    && `, ${artefacts.size} artefact${artefacts.size > 1 ? 's' : ''}`}.
+                  {' '}Excluded parts keep the name the file gave them.
                 </div>
               </div>
             )}
 
-            {settings && !settings.configured && !namer.busy && (
+            {naming && (
+              <div className="name-prog">
+                <div className={`bar${progressOf ? '' : ' indet'}`}>
+                  <i style={{ width: `${progressOf * 100}%` }} />
+                </div>
+                {agent.busy && agent.subject && (
+                  <div className="note" style={{ marginTop: 6 }}>
+                    Reading this as {agent.subject}
+                  </div>
+                )}
+              </div>
+            )}
+
+            {agent.asking && (
+              <AgentAsk
+                pending={agent.asking}
+                onAnswer={agent.answer}
+                onStop={agent.stop}
+              />
+            )}
+
+            {agent.report && !naming && (
+              <AgentReport
+                report={agent.report}
+                onDismiss={() => agent.setReport(null)}
+                onOpenPart={(at) => {
+                  const part = parts[at]
+                  if (!part) return
+                  setSelected([part])
+                  setOpened(part)
+                }}
+              />
+            )}
+
+            {settings && !settings.configured && !naming && (
               <div className="name-prog">
                 <div className="note" style={{ marginTop: 0 }}>
                   Naming needs a provider and an API key. Pick one in{' '}
@@ -630,9 +761,9 @@ export default function AnalysisView({
               </div>
             )}
 
-            {namer.error && (
+            {(namer.error || agent.error) && (
               <div className="name-prog">
-                <div className="error-box">{namer.error}</div>
+                <div className="error-box">{namer.error || agent.error}</div>
               </div>
             )}
 
@@ -641,7 +772,13 @@ export default function AnalysisView({
                 <div
                   key={`${name}-${i}`}
                   className={`part-row${selected.includes(name) ? ' on' : ''}${
-                    gone.has(name) ? ' gone' : ''}`}
+                    gone.has(name) ? ' gone' : ''}${
+                    artefacts.has(i) ? ' artefact' : under.has(i) ? ' under' : ''}`}
+                  title={artefacts.has(i)
+                    ? 'One face, no volume: a modelling artefact. Always left alone.'
+                    : under.has(i)
+                      ? 'Below the size floor, so it will keep its file name.'
+                      : undefined}
                   onClick={(e) => {
                     if (gone.has(name)) return
                     mark(name, e.shiftKey || e.ctrlKey || e.metaKey)

@@ -152,7 +152,111 @@ Blender pass would cost a process launch per part. Each part gets up to two:
 Only the renders and the file's own name are sent; the model itself never leaves
 the machine it was uploaded to.
 
+### The agent, and why it exists
+
+The plain run above has a failure mode that is worth naming, because it is not
+subtle and it is not rare. A part photographed alone has no scale and no
+neighbours. A telescoping cylinder is a gas lift or a hydraulic ram; a curved
+bar is an armrest or a handlebar; a five-armed star is a chair base or a
+chassis. Shown enough of these in a row, a model settles on a story about what
+the assembly is, and then generates names to fit it. An IKEA MARKUS office chair
+came back as an all-terrain vehicle — rear wheels, handlebars, a steering
+column, an engine mount — all forty-six parts, coherently wrong.
+
+**Reason about the model first**, in Settings, runs an agent instead. It is on
+by default. The loop lives in `backend/app/agent.py`; the browser is its eyes,
+because that is where the WebGL context is and the API key is not:
+
+```
+survey ──▶ identify the whole model ──▶ [ask] ──▶ name a batch ──▶ [look again] ──▶ report
+             4 views, one request              neighbourhood crops + measurements
+```
+
+Four things do the work, and none of them is a better prompt:
+
+- **The assembly is identified before any part is named.** Four views of the
+  whole model, one request, one sentence — *high-back mesh office chair* — pinned
+  into every request that follows. This is the answer everything else hangs off,
+  and it is the one worth a person's glance.
+- **Parts are shot among their neighbours**, framed on the part's own box grown
+  three times, with the neighbours solid around it. Shape, scale and what a part
+  fastens to arrive in one picture. The tight isolated shot still goes along for
+  the detail, as the second image rather than the only one.
+- **Measurements travel as text.** Size in the file's units against the whole
+  model's, height above the base, which side of the centre line, vertex and face
+  counts, material name. It costs nothing, and it is what separates a 2 cm bolt
+  from a 51 cm cushion when both fill the frame.
+- **The agent may ask to look again.** A part it cannot place comes back as a
+  request for another angle rather than a guess, twice at most, and whatever it
+  finally commits carries a confidence and the evidence behind it.
+
+Two things never reach the model at all, because the geometry settles them:
+
+- **Parts with one face and no volume** — the single-triangle scraps a scan
+  leaves behind — are named as modelling artefacts and set aside. Nothing
+  rendered can identify them, which is exactly why the plain namer invents
+  something. The MARKUS file has ten.
+- **Identical parts are looked at once.** Same vertex count, face count and box:
+  one identification names the set, told apart by where each one sits — *Front
+  Left*, *Rear*, *Left*. On the MARKUS that is 30 parts photographed instead of
+  46. Matching is exact on purpose; a copy that was *rotated* onto its mounting
+  is offered to the model as a hint rather than merged, because giving two parts
+  one wrong name is worse than naming each of them. When a set turns out to be
+  only half of a family, the positional words are withheld — two of five castors
+  called *front right* and *rear left* point at corners that do not exist.
+
+### Deciding what is worth naming
+
+Above the parts list is **Skip parts under**, a percentage of the model's
+longest side. As you move it the list says what it takes in and what it leaves
+out — *"Under 4.70 on the longest side, where the whole model is 117. 27 of 46
+parts analysed, 9 left alone, 10 artefacts"* — and the excluded rows dim, so the
+decision is made before a request is spent rather than after. A part left out
+keeps the name the file gave it and gets no description: not analysed, and so
+nothing invented about it either. It stays in the parts document, because the
+document's index has to keep pointing at the right part in the file.
+
+A percentage rather than a length, because the same chair arrives in
+millimetres, centimetres or metres depending on who exported it. Measured on the
+longest side rather than volume: a wiring loom or a long thin rod has almost no
+volume and is still worth naming, where a washer is small however you measure
+it. Zero names everything, which is the default.
+
+This is a cost and clutter control, not an accuracy one. It will not make the
+naming better — on the chair the two parts the agent gets wrong are a 33 cm
+mechanism housing and a 4.4 cm lever, and any floor that excluded the lever
+would also drop fifteen castor parts it gets right. What it is for is the
+500-part CAD assembly that is nine tenths fasteners, where naming every washer
+costs a request each and buries the parts you actually wanted in a list of
+identical bolts.
+
+Single-triangle artefacts are set aside regardless of where the slider sits:
+their size is beside the point, since no rendered view can identify one face.
+
+### Where it stops and asks
+
+Set by **Stop and ask** in Settings.
+
+- **What the model is** (the default). One question, before any part is named,
+  with the picture the answer rests on. Answering *yes* costs a click; typing
+  something else replaces the subject and every name that follows is worked out
+  against what you typed. This is the cheapest possible place to catch the
+  failure above — it is one question standing in front of forty-six wrong names.
+- **That, and every doubt.** Also raises each part the agent itself marked low
+  confidence, one at a time, with the part re-rendered beside the question.
+  Only those: a panel that asks about everything teaches you to click through it
+  without reading.
+- **Never.** Fully autonomous. The run still reports what it took the model to
+  be and which parts it was unsure of, so the assumption is on screen even when
+  nobody was asked to confirm it.
+
+When the run ends it says what it read the model as, and lists the parts it was
+not sure of with the reason it gave — the rows worth opening before you save.
+
 ### One part per request, or several
+
+The settings below apply to the plain namer, when the agent is switched off.
+
 
 Both, switched in **Settings**.
 
@@ -799,6 +903,9 @@ receive traffic.
 | `GET` | `/api/settings` | Part-naming settings. Never includes the API key. |
 | `PUT` | `/api/settings` | Save them; `?clear_key=<provider>` forgets one stored key. |
 | `POST` | `/api/name-parts` | Name one chunk of rendered parts. |
+| `POST` | `/api/agent/start` | Open an agent run from the browser's survey; returns the first shots to take. |
+| `POST` | `/api/agent/step` | One turn: the pictures taken and any answer, in; what to do next, out. |
+| `DELETE` | `/api/agent/{id}` | Let go of a run the browser abandoned. |
 
 ```bash
 curl -F file=@part.stp -F target=.usdz \
@@ -862,15 +969,28 @@ for STEP/IGES. Drag any of them onto the upload area.
 .venv/Scripts/python -m pytest backend/tests -q
 ```
 
-149 tests: format and alias resolution, upload validation, filename
+210 tests: format and alias resolution, upload validation, filename
 sanitisation, archive extraction safety (zip-slip, symlinks, entry floods,
 decompression bombs), model discovery across container formats and nesting
 depths, texture relinking, and real Blender conversions — STL to every headline
 target, STEP → USDZ, zipped OBJ with materials, USDZ archive spec compliance,
 scale/centre correctness, part renaming through a re-export, and animation —
 one named glTF clip per animation, the whole-model root on its pivot, clips
-reaching USD and FBX, and stills refusing them. Conversion tests skip
-automatically when Blender is absent.
+reaching USD and FBX, and stills refusing them.
+
+The naming agent has its own file, `test_agent.py`, with the provider stubbed at
+`naming.ask`: that the assembly is settled before a single part is named, that a
+part with one face never reaches a vision model at all, that identical parts are
+photographed once and told apart by where they sit — and not given positions
+when only half the family was found — that a part the agent cannot place is
+looked at again rather than guessed at and that looking again is bounded, and
+that a correction typed by the user reaches every part of a set, and that a
+size floor leaves the small parts alone while never letting one through that has
+no volume. `test_parts_doc`
+covers reading the part order back out of a written glTF, which is what stops a
+rename silently renumbering the document beside it.
+
+Conversion tests skip automatically when Blender is absent.
 
 ## Project layout
 
@@ -882,17 +1002,25 @@ backend/app/
   formats.py       single source of truth for supported formats
   jobs.py          in-memory job store + worker pool
   main.py          FastAPI routes
+  naming.py        the plain one-shot namer, and the call every provider goes through
+  agent.py         the reasoning loop: identify, shoot, look again, ask, commit
+  parts_doc.py     the parts document, and reading the order the export really wrote
   settings.py      the naming settings, persisted in the data directory
   vault.py         sealing the API keys in that file, and what that protects
 frontend/src/
   App.tsx          shell: health/capabilities and the two tabs
   useConversion.ts upload + job polling, shared by both tabs
   views/           ConvertView (format → options → result), AnalysisView
+  partGraph.ts     which nodes count as parts, shared by the viewer and the shots
+  partShots.ts     the offscreen studio: neighbourhood, isolated, context, survey
+  useNamer.ts      the plain run: render everything, then ask in chunks
+  useAgent.ts      the agent's eyes: render what it asked for, put its questions
   usePartShot.ts   one part rendered alone, for the preview and the dialog
   animation.ts     clips and keyframes: the blend the viewer plays and Blender bakes
   player.ts        the clock a clip plays to, kept outside React
   components/      Dropzone, OptionsPanel, ModelViewer (three.js + explode),
                    PartEditor, PartPreview, PartDialog (one part, full size),
+                   AgentAsk (where the run stops for a person), AgentReport,
                    AnimEditor (pose at the playhead), Timeline
 docs/FORMATS.md    what each engine actually provides, and why
 ```

@@ -226,6 +226,7 @@ button:disabled { cursor: not-allowed; }
 .opt-row { display: flex; align-items: center; justify-content: space-between; gap: 14px; }
 .opt-row label { color: var(--muted); font-size: 13px; }
 .opt-row .ctl { display: flex; align-items: center; gap: 8px; flex: none; }
+.opt-row .ctl .unit { font-size: 12px; color: var(--dim); white-space: nowrap; }
 /* Name over explanation, so the control column still lines up down the panel. */
 .opt-row .lbl { display: flex; flex-direction: column; gap: 3px; flex: 1; min-width: 0; }
 .opt-row .lbl .hint { font-size: 11px; color: var(--dim); line-height: 1.45; }
@@ -908,6 +909,66 @@ input[type='range'] { width: 110px; accent-color: var(--accent); }
 .name-go { flex: 1; padding: 8px 12px; font-size: 13px; }
 .name-prog { padding: 0 16px 12px; }
 .name-prog .note { margin-top: 0; }
+
+/* The size floor: what the namer will bother with, decided before it runs. */
+
+.size-floor { padding: 0 16px 12px; display: flex; flex-direction: column; gap: 6px; }
+.size-floor-row { display: flex; align-items: center; gap: 10px; }
+.size-floor-row label { flex: none; font-size: 12px; color: var(--muted); }
+.size-floor-row input[type=range] { flex: 1; min-width: 0; accent-color: var(--accent); }
+.size-floor-row output {
+  flex: none; min-width: 46px; text-align: right;
+  font-size: 12px; font-variant-numeric: tabular-nums; color: var(--text);
+}
+.size-floor-read { font-size: 11px; line-height: 1.5; color: var(--dim); }
+.size-floor-read strong { color: var(--text); }
+
+/* A part the namer will not spend a request on, marked in the list as the
+   slider moves rather than after a run has been paid for. */
+.part-row.under, .part-row.artefact { opacity: .5; }
+.part-row.under input, .part-row.artefact input { font-style: italic; }
+.part-row.artefact .part-n { color: var(--warn); }
+
+/* The agent stopping to ask, and the account it gives when it finishes. */
+
+.agent-ask, .agent-report {
+  margin: 0 16px 12px;
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  overflow: hidden;
+}
+.agent-ask { border-color: var(--accent); }
+
+.agent-shot {
+  display: block; width: 100%; max-height: 220px;
+  object-fit: contain; background: #5a6172;
+}
+.agent-ask-body { display: flex; flex-direction: column; gap: 8px; padding: 12px 14px; }
+
+.agent-q { margin: 0; font-size: 14px; font-weight: 600; }
+.agent-why { margin: 0; font-size: 12px; line-height: 1.5; color: var(--muted); }
+
+.agent-actions { display: flex; align-items: center; gap: 8px; }
+.agent-actions .go { flex: 1; padding: 7px 12px; font-size: 13px; margin: 0; }
+
+.agent-fix { display: flex; align-items: center; gap: 6px; }
+.agent-fix > span { flex: none; font-size: 12px; color: var(--muted); }
+.agent-fix input { flex: 1; min-width: 0; }
+
+.agent-report { padding: 12px 14px; display: flex; flex-direction: column; gap: 8px; }
+.agent-report-head { display: flex; align-items: center; justify-content: space-between; }
+.agent-badge {
+  font-size: 10px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase;
+  color: var(--ok); background: rgba(62, 207, 142, .12);
+  border-radius: 5px; padding: 3px 7px;
+}
+.agent-subject { margin: 0; font-size: 13px; line-height: 1.5; }
+.agent-subject strong { color: var(--text); }
+
+.agent-unsure { margin: 0; padding-left: 18px; display: flex; flex-direction: column; gap: 4px; }
+.agent-unsure li { font-size: 12px; line-height: 1.5; color: var(--muted); }
+.agent-unsure .link { font-weight: 600; }
 
 /* ---------- settings page ---------- */
 

@@ -17,6 +17,7 @@ schema would either cramp one or pad the other.
 from __future__ import annotations
 
 import json
+import struct
 import time
 from pathlib import Path
 
@@ -93,8 +94,125 @@ class PartDetail(BaseModel):
         }
 
 
-def build(parts: list[PartDetail], *, model_file: str, source_name: str) -> dict:
-    """The document to write beside a model being exported."""
+# glTF's magic, and the tag on its JSON chunk. Only the first chunk is read:
+# it holds the whole node graph, and the buffer after it can be a hundred
+# megabytes that nothing here needs.
+_GLB_MAGIC = 0x46546C67
+_GLB_JSON = 0x4E4F534A
+# A node graph big enough for any real assembly; a header claiming more than
+# this is not one we should be allocating for.
+MAX_GLTF_JSON = 64 * 1024 * 1024
+
+
+def _gltf_json(path: Path) -> dict | None:
+    """The glTF document inside a .gltf or .glb, or None if it is neither."""
+    suffix = path.suffix.lower()
+    try:
+        if suffix == ".gltf":
+            if path.stat().st_size > MAX_GLTF_JSON:
+                return None
+            found = json.loads(path.read_text("utf-8"))
+        elif suffix == ".glb":
+            with path.open("rb") as handle:
+                magic, _version, _length = struct.unpack("<III", handle.read(12))
+                if magic != _GLB_MAGIC:
+                    return None
+                size, kind = struct.unpack("<II", handle.read(8))
+                if kind != _GLB_JSON or size > MAX_GLTF_JSON:
+                    return None
+                found = json.loads(handle.read(size).decode("utf-8"))
+        else:
+            return None
+    except (OSError, ValueError, struct.error, UnicodeDecodeError):
+        return None
+    return found if isinstance(found, dict) else None
+
+
+def _draws(index: int, nodes: list, seen: set[int] | None = None) -> bool:
+    """Does this node, or anything under it, actually draw something?"""
+    seen = seen if seen is not None else set()
+    if index in seen or not 0 <= index < len(nodes):
+        return False
+    seen.add(index)
+    node = nodes[index]
+    if not isinstance(node, dict):
+        return False
+    if "mesh" in node:
+        return True
+    return any(_draws(child, nodes, seen) for child in node.get("children") or [])
+
+
+def export_order(path: Path) -> list[str]:
+    """The part names in the order the written file actually lists them.
+
+    Which is *not* the order they were sent in. Renaming happens in Blender by
+    object name, which is correct, but the glTF exporter walks
+    ``bpy.data.objects`` -- a collection Blender keeps sorted alphabetically --
+    so renaming a model reorders it. Anything keyed on position would then point
+    at the wrong part in the file it was written beside.
+
+    The descent through single-child wrappers matches ``partNodes`` in
+    frontend/src/partGraph.ts, so the browser and the document agree on which
+    nodes are parts. An empty list means the format carries no readable node
+    order, and the indices are left as they were sent.
+    """
+    found = _gltf_json(path)
+    if not found:
+        return []
+    nodes = found.get("nodes")
+    scenes = found.get("scenes")
+    if not isinstance(nodes, list) or not isinstance(scenes, list) or not scenes:
+        return []
+    at = found.get("scene", 0)
+    if not isinstance(at, int) or not 0 <= at < len(scenes):
+        at = 0
+    scene = scenes[at]
+    roots = scene.get("nodes") if isinstance(scene, dict) else None
+    if not isinstance(roots, list):
+        return []
+
+    level = [i for i in roots if isinstance(i, int) and _draws(i, nodes)]
+    while len(level) == 1 and (nodes[level[0]] or {}).get("children"):
+        deeper = [i for i in nodes[level[0]]["children"]
+                  if isinstance(i, int) and _draws(i, nodes)]
+        if not deeper:
+            break
+        level = deeper
+    if len(level) < 2:
+        return []
+    return [str((nodes[i] or {}).get("name") or "") for i in level]
+
+
+def renumbered(parts: list[dict], order: list[str]) -> tuple[list[dict], bool]:
+    """Point every entry's index at where that part really sits in the file.
+
+    All or nothing: a partial renumber would leave the document half describing
+    one order and half another, which is worse than describing the order it was
+    given. So unless every part is found exactly once in the written file, the
+    indices are left alone and the document says they were not confirmed.
+    """
+    if not order:
+        return parts, False
+    at = {}
+    for position, name in enumerate(order):
+        at.setdefault(name, position)
+    if any(part["name"] not in at for part in parts):
+        return parts, False
+    return [{**part, "index": at[part["name"]]} for part in parts], True
+
+
+def build(parts: list[PartDetail], *, model_file: str, source_name: str,
+          written: Path | None = None) -> dict:
+    """The document to write beside a model being exported.
+
+    ``written`` is the exported file itself. When it is a glTF the part order is
+    read back out of it, because the export does not preserve the order the
+    parts were sent in -- see ``export_order``.
+    """
+    cleaned = [p.cleaned() for p in parts[:MAX_PARTS]]
+    confirmed = False
+    if written is not None and written.exists():
+        cleaned, confirmed = renumbered(cleaned, export_order(written))
     return {
         "format": FORMAT,
         "version": VERSION,
@@ -103,8 +221,12 @@ def build(parts: list[PartDetail], *, model_file: str, source_name: str) -> dict
             "file": model_file,
             "sourceFile": source_name,
             "parts": len(parts),
+            # Whether "index" was checked against the file beside this document
+            # or is only the order the parts were sent in. A reader that needs
+            # certainty should join on "originalName", which survives either way.
+            "indexMatchesFile": confirmed,
         },
-        "parts": [p.cleaned() for p in parts[:MAX_PARTS]],
+        "parts": cleaned,
     }
 
 

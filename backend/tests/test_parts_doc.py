@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import struct
 import zipfile
 from pathlib import Path
 
@@ -29,7 +30,8 @@ def test_a_document_carries_its_marker_and_every_part():
         model_file="bike.glb", source_name="bike.fbx",
     )
     assert doc["format"] == parts_doc.FORMAT
-    assert doc["model"] == {"file": "bike.glb", "sourceFile": "bike.fbx", "parts": 2}
+    assert doc["model"] == {"file": "bike.glb", "sourceFile": "bike.fbx",
+                            "parts": 2, "indexMatchesFile": False}
     assert [p["name"] for p in doc["parts"]] == ["Front Wheel", "Hex Bolt"]
     assert doc["parts"][0]["originalName"] == "Mesh_001"
     assert doc["parts"][0]["details"] == {"Purpose": "Rolls"}
@@ -212,3 +214,106 @@ def test_the_browser_sends_a_document_shaped_part_and_it_arrives_whole():
         "index": 0, "originalName": "Mesh_001", "name": "Front Wheel",
         "details": {"Purpose": "Rolls"},
     }
+
+
+# --- the order the file actually ends up in -----------------------------------
+#
+# Renaming a model reorders it. Blender renames by object name, which is right,
+# but its glTF exporter walks bpy.data.objects -- kept sorted alphabetically --
+# so the parts come out in the order of their *new* names. A document numbered
+# from the order they were sent in would point at the wrong parts.
+
+def gltf(names, *, wrapper=True):
+    """A glTF document whose parts are `names`, in that order."""
+    nodes = []
+    parts = []
+    for name in names:
+        mesh_at = len(nodes)
+        nodes.append({"name": f"{name}_mesh", "mesh": 0})
+        parts.append(len(nodes))
+        nodes.append({"name": name, "children": [mesh_at]})
+    if wrapper:
+        roots = [len(nodes)]
+        nodes.append({"name": "Scene wrapper", "children": parts})
+    else:
+        roots = parts
+    return {"asset": {"version": "2.0"}, "scene": 0,
+            "scenes": [{"nodes": roots}], "nodes": nodes,
+            "meshes": [{"primitives": []}]}
+
+
+def write_glb(path: Path, document: dict) -> Path:
+    body = json.dumps(document).encode("utf-8")
+    body += b" " * (-len(body) % 4)
+    path.write_bytes(
+        struct.pack("<III", 0x46546C67, 2, 12 + 8 + len(body))
+        + struct.pack("<II", len(body), 0x4E4F534A) + body)
+    return path
+
+
+def test_the_order_is_read_out_of_a_written_glb(tmp_path):
+    written = write_glb(tmp_path / "m.glb", gltf(["Seat", "Base", "Castor"]))
+    assert parts_doc.export_order(written) == ["Seat", "Base", "Castor"]
+
+
+def test_a_gltf_reads_the_same_way(tmp_path):
+    path = tmp_path / "m.gltf"
+    path.write_text(json.dumps(gltf(["Seat", "Base"])), encoding="utf-8")
+    assert parts_doc.export_order(path) == ["Seat", "Base"]
+
+
+def test_wrappers_are_descended_the_way_the_viewer_descends_them(tmp_path):
+    """The browser and the document have to agree on which nodes are parts."""
+    flat = write_glb(tmp_path / "a.glb", gltf(["Seat", "Base"], wrapper=False))
+    assert parts_doc.export_order(flat) == ["Seat", "Base"]
+
+
+def test_a_format_with_no_readable_order_leaves_the_indices_alone(tmp_path):
+    path = tmp_path / "m.fbx"
+    path.write_bytes(b"not a gltf")
+    assert parts_doc.export_order(path) == []
+
+
+def test_a_truncated_glb_is_ignored_rather_than_thrown(tmp_path):
+    path = tmp_path / "m.glb"
+    path.write_bytes(b"glTF" + bytes(6))
+    assert parts_doc.export_order(path) == []
+
+
+def test_a_single_part_model_has_no_order_worth_recording(tmp_path):
+    """The viewer treats a lone drawable as no parts at all; so does this."""
+    written = write_glb(tmp_path / "m.glb", gltf(["Only"]))
+    assert parts_doc.export_order(written) == []
+
+
+def test_the_indices_are_moved_to_where_the_parts_really_are(tmp_path):
+    written = write_glb(tmp_path / "m.glb", gltf(["Base", "Castor", "Seat"]))
+    doc = parts_doc.build(
+        [detail(0, "Seat", "Mesh_001"), detail(1, "Base", "Mesh_002"),
+         detail(2, "Castor", "Mesh_003")],
+        model_file="m.glb", source_name="m.fbx", written=written)
+
+    assert doc["model"]["indexMatchesFile"] is True
+    assert {p["name"]: p["index"] for p in doc["parts"]} == {
+        "Base": 0, "Castor": 1, "Seat": 2}
+    # The original names are untouched: they are what a reader joins on when the
+    # index cannot be trusted.
+    assert {p["name"]: p["originalName"] for p in doc["parts"]} == {
+        "Seat": "Mesh_001", "Base": "Mesh_002", "Castor": "Mesh_003"}
+
+
+def test_a_part_missing_from_the_file_leaves_every_index_as_it_was(tmp_path):
+    """Half one order and half another would be worse than one honest order."""
+    written = write_glb(tmp_path / "m.glb", gltf(["Base", "Castor"]))
+    doc = parts_doc.build(
+        [detail(0, "Seat"), detail(1, "Base"), detail(2, "Castor")],
+        model_file="m.glb", source_name="m.fbx", written=written)
+
+    assert doc["model"]["indexMatchesFile"] is False
+    assert [p["index"] for p in doc["parts"]] == [0, 1, 2]
+
+
+def test_a_document_written_without_the_file_says_so():
+    doc = parts_doc.build([detail(0, "Seat"), detail(1, "Base")],
+                          model_file="m.glb", source_name="m.fbx")
+    assert doc["model"]["indexMatchesFile"] is False

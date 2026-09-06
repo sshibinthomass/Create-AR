@@ -250,7 +250,8 @@ def _quirk_for(exc: Exception) -> str | None:
     return None
 
 
-def _ask_openai(req: NameRequest, settings: Settings) -> str | None:
+def _ask_openai(system: str, blocks: list[dict], max_tokens: int,
+                settings: Settings) -> str | None:
     """Azure OpenAI, OpenAI itself, or anything wearing the same API."""
     # Imported inside the call rather than at module scope so the rest of the
     # service -- and its tests -- still run without the SDK installed.
@@ -279,12 +280,12 @@ def _ask_openai(req: NameRequest, settings: Settings) -> str | None:
     body = {
         "model": settings.model(),
         "messages": [
-            {"role": "system", "content": instructions_for(req, settings)},
-            {"role": "user", "content": _blocks(req)},
+            {"role": "system", "content": system},
+            {"role": "user", "content": blocks},
         ],
         "response_format": {"type": "json_object"},
         "temperature": 0.2,
-        "max_tokens": _budget(req),
+        "max_tokens": max_tokens,
     }
     where = (settings.provider, settings.compatible_url, settings.model())
     known = _quirks.setdefault(where, set())
@@ -308,7 +309,8 @@ def _ask_openai(req: NameRequest, settings: Settings) -> str | None:
     raise NamingError("The model kept refusing the request parameters.")
 
 
-def _ask_anthropic(req: NameRequest, settings: Settings) -> str | None:
+def _ask_anthropic(system: str, blocks: list[dict], schema: dict, max_tokens: int,
+                   effort: str | None, settings: Settings) -> str | None:
     """Claude, whose images, system prompt and JSON contract all differ."""
     try:
         import anthropic
@@ -321,18 +323,17 @@ def _ask_anthropic(req: NameRequest, settings: Settings) -> str | None:
     try:
         reply = client.messages.create(
             model=settings.anthropic_model,
-            max_tokens=_budget(req),
+            max_tokens=max_tokens,
             # The instructions are the system prompt here, not a first message.
-            system=instructions_for(req, settings),
-            messages=[{"role": "user",
-                       "content": _blocks(req, _anthropic_image)}],
+            system=system,
+            messages=[{"role": "user", "content": blocks}],
             output_config={
                 # Naming a part from a picture is a judgement, not a puzzle, so
-                # the low setting keeps it quick and cheap. Describing one asks
-                # for more thought, and gets the default.
-                **({"effort": "low"} if not req.describe else {}),
-                "format": {"type": "json_schema",
-                           "schema": reply_schema(req.describe)},
+                # the low setting keeps it quick and cheap. Describing one, or
+                # deciding what to look at next, asks for more thought and gets
+                # the default.
+                **({"effort": effort} if effort else {}),
+                "format": {"type": "json_schema", "schema": schema},
             },
         )
     except anthropic.AnthropicError as exc:
@@ -341,6 +342,24 @@ def _ask_anthropic(req: NameRequest, settings: Settings) -> str | None:
     if reply.stop_reason == "refusal":
         raise NamingError("The model declined to answer.")
     return next((b.text for b in reply.content if b.type == "text"), None)
+
+
+def ask(system: str, blocks, schema: dict, max_tokens: int, settings: Settings,
+        effort: str | None = None) -> str | None:
+    """One request to whichever provider is selected. Returns the raw reply.
+
+    ``blocks`` is a function rather than a list because only the image block
+    differs between the providers: it is called with the image builder for the
+    chosen one, so the wording -- the part that decides how good the answers
+    are -- is written once at the call site.
+
+    ``schema`` is enforced by Anthropic and ignored by the OpenAI-shaped
+    providers, which are only asked for an object; see ``reply_schema``.
+    """
+    if settings.provider == "anthropic":
+        return _ask_anthropic(system, blocks(_anthropic_image), schema,
+                              max_tokens, effort, settings)
+    return _ask_openai(system, blocks(_image), max_tokens, settings)
 
 
 def instructions_for(req: NameRequest, settings: Settings) -> str:
@@ -352,5 +371,12 @@ def instructions_for(req: NameRequest, settings: Settings) -> str:
 
 def name_parts(req: NameRequest, settings: Settings) -> dict[int, dict]:
     """Name one chunk of parts. Returns {index: {name, details}}."""
-    ask = _ask_anthropic if settings.provider == "anthropic" else _ask_openai
-    return _read(ask(req, settings), req)
+    reply = ask(
+        instructions_for(req, settings),
+        lambda image: _blocks(req, image),
+        reply_schema(req.describe),
+        _budget(req),
+        settings,
+        effort=None if req.describe else "low",
+    )
+    return _read(reply, req)

@@ -112,6 +112,28 @@ class Settings(BaseModel):
     compatible_key: str = Field("", max_length=400)
     compatible_model: str = Field("", max_length=200)
 
+    # Run the agent in agent.py rather than the plain one-shot namer. The agent
+    # works out what the assembly is before it names anything, shoots each part
+    # in its neighbourhood instead of alone, and may ask to look again -- which
+    # costs more requests and is the difference between naming a chair's parts
+    # and naming a quad bike's.
+    agent: bool = True
+    # Where the run stops for a person. "subject" checks only what the model
+    # decided the assembly is, which is the answer everything else hangs off;
+    # "full" also raises every part the agent marked low confidence.
+    agent_hitl: str = Field("subject", pattern="^(off|subject|full)$")
+    # Parts per thinking step. Small on purpose: it was eight parts and sixteen
+    # images to a request where the ids and the pictures came apart.
+    agent_batch: int = Field(4, ge=1, le=8)
+    # Leave parts smaller than this alone, as a percentage of the model's
+    # longest dimension. A percentage rather than a length because files arrive
+    # in millimetres, metres and inches and a fixed number means nothing across
+    # them. Zero names everything, which is what this did before the setting
+    # existed. It is a cost and clutter control, not an accuracy one: a
+    # 500-part assembly is mostly fasteners, and each one costs a request and a
+    # paragraph nobody reads.
+    min_part_size: float = Field(0.0, ge=0.0, le=25.0)
+
     # How the parts are handed over: one request each, or several to a request.
     mode: str = Field("batch", pattern="^(single|batch)$")
     batch_size: int = Field(8, ge=1, le=24)

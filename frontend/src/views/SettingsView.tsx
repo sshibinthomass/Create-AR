@@ -193,7 +193,93 @@ export default function SettingsView({ settings, onSaved }: {
             </>
           )}
 
-          <div className="group-label">How the parts are sent</div>
+          <div className="group-label">How the parts are worked out</div>
+
+          <div className="opt-row">
+            <label htmlFor="nm-agent">Reason about the model first</label>
+            <div className="ctl">
+              <label className="switch">
+                <input
+                  id="nm-agent" type="checkbox"
+                  checked={form.agent}
+                  onChange={(e) => set('agent', e.target.checked)}
+                />
+                <span />
+              </label>
+            </div>
+          </div>
+
+          <div className="note">
+            On, the run works out what the whole assembly is before naming
+            anything, photographs each part among its neighbours rather than
+            alone, sends every part's real measurements alongside the picture,
+            and asks to look again at anything it cannot place. Off, every part
+            is shot on its own and named in one pass — quicker and cheaper, and
+            the way a chair's castors come back as tyres.
+          </div>
+
+          {form.agent ? (
+            <>
+              <div className="opt-row">
+                <label htmlFor="nm-hitl">Stop and ask</label>
+                <div className="ctl">
+                  <select
+                    id="nm-hitl"
+                    style={{ width: 200 }}
+                    value={form.agent_hitl}
+                    onChange={(e) =>
+                      set('agent_hitl', e.target.value as NamerSettings['agent_hitl'])}
+                  >
+                    <option value="off">Never</option>
+                    <option value="subject">What the model is</option>
+                    <option value="full">That, and every doubt</option>
+                  </select>
+                </div>
+              </div>
+
+              <div className="opt-row">
+                <label htmlFor="nm-abatch">Parts per thinking step</label>
+                <div className="ctl">
+                  <input
+                    id="nm-abatch" type="number" min={1} max={8}
+                    value={form.agent_batch}
+                    onChange={(e) => set('agent_batch', Number(e.target.value))}
+                  />
+                </div>
+              </div>
+
+              <div className="opt-row">
+                <label htmlFor="nm-floor">Skip parts under</label>
+                <div className="ctl">
+                  <input
+                    id="nm-floor" type="number" min={0} max={25} step={0.5}
+                    value={form.min_part_size}
+                    onChange={(e) => set('min_part_size', Number(e.target.value))}
+                  />
+                  <span className="unit">% of the model</span>
+                </div>
+              </div>
+
+              <div className="note">
+                What the assembly is decides every name that follows it, so it is
+                the one answer worth a glance before forty parts are named
+                against it. Keep the step small: it was eight parts and sixteen
+                pictures to a request where the ids and the images came apart.
+              </div>
+
+              <div className="note">
+                The size floor is where the slider above the parts list starts —
+                that slider is what decides for a given run, and it shows which
+                parts it takes in and which it leaves out as you move it. A part
+                left out keeps the name the file gave it and gets no
+                description. Zero names everything. It is a cost and clutter
+                control rather than an accuracy one: a 500-part assembly is
+                mostly fasteners, and each one costs a request and a paragraph
+                nobody reads.
+              </div>
+            </>
+          ) : (
+            <>
 
           <div className="opt-row">
             <label htmlFor="nm-mode">Requests</label>
@@ -246,6 +332,8 @@ export default function SettingsView({ settings, onSaved }: {
               </label>
             </div>
           </div>
+            </>
+          )}
 
           <div className="opt-row">
             <label htmlFor="nm-describe">Describe each part, not just name it</label>

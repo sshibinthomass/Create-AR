@@ -435,6 +435,19 @@ export interface NamerSettings {
   compatible_url: string
   compatible_model: string
 
+  /** Run the reasoning agent rather than the plain one-shot namer. */
+  agent: boolean
+  /** Where the agent stops for a person: never, the subject only, or every doubt. */
+  agent_hitl: 'off' | 'subject' | 'full'
+  /** Parts the agent thinks about at once. */
+  agent_batch: number
+  /**
+   * Leave parts under this size alone, as a percentage of the model's longest
+   * side. Where the slider in the parts list starts; that slider is what
+   * decides for a given run.
+   */
+  min_part_size: number
+
   /** 'single' sends one part per request, 'batch' sends `batch_size` of them. */
   mode: 'single' | 'batch'
   batch_size: number
@@ -513,4 +526,98 @@ export function nameParts(
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ parts, total, taken, describe }),
   }).then(json<{ names: NamedPart[] }>)
+}
+
+/* --- the agent ------------------------------------------------------------
+ *
+ * The loop lives in backend/app/agent.py; the browser is its eyes. Each step
+ * comes back saying what to render and, sometimes, what to ask the user. The
+ * browser does both and posts the results to the next step. Nothing here
+ * decides anything -- that is the point of keeping it on the server, where the
+ * transcript and the API key both are.
+ */
+
+/** One part, measured. Costs nothing to send and carries what a picture cannot. */
+export interface PartFacts {
+  index: number
+  name: string
+  vertices: number
+  faces: number
+  /** Bounding box and its centre, in the file's own units. */
+  size: number[]
+  centre: number[]
+  /** Bounding-sphere radius: unlike the box, a rotation does not change it. */
+  radius: number
+  material: string
+}
+
+export type ShotView = 'whole' | 'neighbourhood' | 'isolated' | 'context' | 'scaled'
+
+/** One render the agent has asked for. `key` comes back with the pixels. */
+export interface ShotSpec {
+  key: string
+  index: number
+  view: ShotView
+  yaw: number
+  pitch: number
+  grow: number
+}
+
+/** A question the run stops at until someone answers it. */
+export interface AgentAsk {
+  kind: 'subject' | 'part'
+  index: number
+  question: string
+  detail: string
+  options: string[]
+  /** Which of the shots just taken to show beside the question. */
+  image_key: string
+}
+
+export interface AgentNamed extends NamedPart {
+  confidence: 'high' | 'medium' | 'low'
+  evidence: string
+}
+
+export interface AgentStep {
+  session: string
+  phase: 'identify' | 'confirm' | 'name' | 'review' | 'done'
+  note: string
+  shoot: ShotSpec[]
+  ask: AgentAsk | null
+  named: AgentNamed[]
+  subject: string
+  done: number
+  total: number
+  finished: boolean
+  summary: string
+}
+
+export function startAgent(
+  survey: { extents: number[]; base: number[]; parts: PartFacts[] },
+  /** Percentage of the model's longest side under which a part is left alone. */
+  minPartSize = 0,
+): Promise<AgentStep> {
+  return fetch('/api/agent/start', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ survey, min_part_size: minPartSize }),
+  }).then(json<AgentStep>)
+}
+
+export function stepAgent(
+  session: string,
+  seen: { key: string; image: string }[],
+  answer = '',
+): Promise<AgentStep> {
+  return fetch('/api/agent/step', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ session, seen, answer }),
+  }).then(json<AgentStep>)
+}
+
+/** Let go of a run the user stopped, so the server is not holding its survey. */
+export function stopAgent(session: string): Promise<unknown> {
+  return fetch(`/api/agent/${session}`, { method: 'DELETE' }).catch(() => null)
 }

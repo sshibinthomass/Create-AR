@@ -243,7 +243,8 @@ def convert(
     bundle = bool(options.get("bundle")) and bool(details)
     if bundle:
         written = parts_doc.write(
-            parts_doc.build(details, model_file=primary.name, source_name=source.name),
+            parts_doc.build(details, model_file=primary.name,
+                            source_name=source.name, written=primary),
             out_dir,
         )
         on_log(f"Wrote {written.name}: {len(details)} parts")
