@@ -12,7 +12,7 @@
  * have to agree exactly: `sample_pose` in blender_job.py mirrors `poseAt` here.
  */
 import { Euler, Quaternion, Vector3, type Object3D } from 'three'
-import type { Clip, Keyframe, Pose, Track } from './api'
+import type { Clip, Ease, Keyframe, Pose, Track } from './api'
 
 export const REST: Pose = { move: [0, 0, 0], rotate: [0, 0, 0], scale: [1, 1, 1] }
 
@@ -29,9 +29,28 @@ const lerp3 = (a: readonly number[], b: readonly number[], k: number): [number, 
 
 const pose = (k: Keyframe): Pose => ({ move: k.move, rotate: k.rotate, scale: k.scale })
 
+/** What new keyframes get, because a part that starts and stops dead looks wrong. */
+export const DEFAULT_EASE: Ease = 'smooth'
+
+/**
+ * The fraction travelled, given the fraction of the way through in time.
+ *
+ * `smooth` is a smoothstep: away from a key and into the next one gently,
+ * which is how a part actually comes off an assembly. `hold` does not travel
+ * at all -- the part sits at this key until the next one takes over, which is
+ * how you make a step rather than a slide.
+ *
+ * Mirrored by `_shape` in blender_job.py, which bakes these into the file.
+ */
+export function shape(k: number, ease: Ease | undefined): number {
+  if (ease === 'hold') return 0
+  if (ease === 'smooth') return k * k * (3 - 2 * k)
+  return k
+}
+
 /**
  * The pose a track is in `time` seconds in: held before the first key and
- * after the last, blended in a straight line between neighbours.
+ * after the last, blended between neighbours along the earlier key's ease.
  *
  * Rotation is blended in degrees rather than as a quaternion. That is what
  * lets a key at 360° mean a full turn -- a quaternion would call it the same
@@ -48,7 +67,7 @@ export function poseAt(track: Track | undefined, time: number): Pose {
   const a = keys[i - 1]
   const b = keys[i]
   const span = b.time - a.time
-  const k = span <= 0 ? 0 : (time - a.time) / span
+  const k = shape(span <= 0 ? 0 : (time - a.time) / span, a.ease)
   return { move: lerp3(a.move, b.move, k), rotate: lerp3(a.rotate, b.rotate, k), scale: lerp3(a.scale, b.scale, k) }
 }
 
@@ -68,9 +87,18 @@ export function newClip(name: string, duration = DEFAULT_DURATION): Clip {
   return { id: `${Date.now().toString(36)}-${counter}`, name, duration, tracks: [] }
 }
 
-/** The clip with one key written: replacing the key at that moment, if there is one. */
-export function setKey(clip: Clip, target: string, time: number, p: Pose): Clip {
-  const key: Keyframe = { time, move: p.move, rotate: p.rotate, scale: p.scale }
+/**
+ * The clip with one key written: replacing the key at that moment, if there is one.
+ *
+ * Overwriting keeps the ease already on that moment, so nudging a slider on a
+ * key you had made a `hold` does not quietly turn it back into a slide.
+ */
+export function setKey(clip: Clip, target: string, time: number, p: Pose, ease?: Ease): Clip {
+  const was = keyAt(clip, target, time)
+  const key: Keyframe = {
+    time, move: p.move, rotate: p.rotate, scale: p.scale,
+    ease: ease ?? was?.ease ?? DEFAULT_EASE,
+  }
   const existing = track(clip, target)
   const keys = (existing?.keys ?? []).filter((k) => Math.abs(k.time - time) >= EPS)
   keys.push(key)
@@ -102,6 +130,105 @@ export function moveKey(clip: Clip, target: string, from: number, to: number): C
   if (!key || Math.abs(from - to) < EPS) return clip
   return setKey(removeKey(clip, target, from), target, to, key)
 }
+
+/** Times are twentieths of a second; carrying float dust past that helps nobody. */
+const round = (t: number): number => Math.round(t * 1000) / 1000
+
+/** One keyframe, named by the track it is on and the moment it sits at. */
+export interface KeyRef {
+  target: string
+  time: number
+}
+
+export const sameKey = (a: KeyRef, b: KeyRef): boolean =>
+  a.target === b.target && Math.abs(a.time - b.time) < EPS
+
+/**
+ * Slide a set of keys along the clip together, keeping their spacing.
+ *
+ * Taking them all out before putting any back is what lets a selection slide
+ * *over* keys it is passing -- the moved key takes that moment, and lifting
+ * first means a key still being carried is never the one displaced.
+ */
+export function shiftKeys(clip: Clip, refs: readonly KeyRef[], delta: number): Clip {
+  if (!refs.length || Math.abs(delta) < EPS) return clip
+  const held = refs
+    .map((r) => ({ target: r.target, key: keyAt(clip, r.target, r.time) }))
+    .filter((h): h is { target: string; key: Keyframe } => h.key !== undefined)
+  let next = refs.reduce((c, r) => removeKey(c, r.target, r.time), clip)
+  for (const { target, key } of held) {
+    next = setKey(next, target, round(key.time + delta), key, key.ease)
+  }
+  return next
+}
+
+/** How far a selection may slide before the outermost key leaves the clip. */
+export function shiftRoom(refs: readonly KeyRef[], duration: number): [number, number] {
+  if (!refs.length) return [0, 0]
+  const times = refs.map((r) => r.time)
+  return [-Math.min(...times), duration - Math.max(...times)]
+}
+
+/** The clip with a set of keys given a different ease. */
+export function setEase(clip: Clip, refs: readonly KeyRef[], ease: Ease): Clip {
+  const on = (t: string, time: number) => refs.some((r) => sameKey(r, { target: t, time }))
+  return {
+    ...clip,
+    tracks: clip.tracks.map((t) => (refs.some((r) => r.target === t.target)
+      ? { ...t, keys: t.keys.map((k) => (on(t.target, k.time) ? { ...k, ease } : k)) }
+      : t)),
+  }
+}
+
+/**
+ * The clip played backwards: every key mirrored about the clip's length.
+ *
+ * A disassembly run in reverse is the assembly, which is the whole reason this
+ * is here -- take the model apart once, and the putting-together comes free.
+ * The ease moves back one key with the direction: the shape that governed
+ * leaving a key now governs leaving the key that used to follow it, which for
+ * `linear` and `smooth` reproduces the original motion exactly backwards.
+ *
+ * `hold` cannot be mirrored exactly, and is not meant to be. A step's mirror
+ * is a step at the far end of the same span, which no single key can say. What
+ * comes out instead is the reading that matches what a hold is *for*: a cover
+ * that sits in place and then pops off, reversed, sits off and pops back on at
+ * the mirrored moment -- the span it waits over is the same, and it waits in
+ * the pose it is travelling from either way.
+ */
+export function reverseClip(clip: Clip): Clip {
+  return {
+    ...clip,
+    tracks: clip.tracks.map((t) => {
+      const flipped = t.keys.map((k) => ({ ...k, time: round(clip.duration - k.time) }))
+        .sort((a, b) => a.time - b.time)
+      const eases = t.keys.map((k) => k.ease)
+      // Key i now leaves towards what was its predecessor, so it takes that
+      // segment's shape; the new last key keeps whatever the old first had.
+      return {
+        ...t,
+        keys: flipped.map((k, i) => ({
+          ...k, ease: eases[eases.length - 1 - i - 1] ?? eases[0] ?? DEFAULT_EASE,
+        })),
+      }
+    }),
+  }
+}
+
+/** A copy of a clip, under a new name and with an id of its own. */
+export function copyClip(clip: Clip, name: string): Clip {
+  counter += 1
+  return {
+    ...clip,
+    id: `${Date.now().toString(36)}-${counter}`,
+    name,
+    tracks: clip.tracks.map((t) => ({ ...t, keys: t.keys.map((k) => ({ ...k })) })),
+  }
+}
+
+/** The clip with one target's keys all gone. */
+export const clearTrack = (clip: Clip, target: string): Clip =>
+  ({ ...clip, tracks: clip.tracks.filter((t) => t.target !== target) })
 
 /** Every moment anything in the clip is keyed at, in order and once each. */
 export function keyTimes(clip: Clip): number[] {

@@ -443,14 +443,77 @@ def build_material(name, settings, color, alpha=1.0, metallic=None, roughness=No
     return mat
 
 
-def fade_object(ob, alpha):
-    """Make one object see-through without replacing how it is shaded.
+def set_base_color(mat, color):
+    """Recolour one material without replacing it.
 
-    A preset swaps a part's materials outright; opacity on its own has to keep
-    them, because the whole point of fading a housing is to look at what is
-    inside it *through* its own finish. Mesh data and materials are both
-    routinely shared between objects, so each is forked before it is touched --
-    otherwise fading one part fades every part instanced from the same mesh.
+    The part keeps its own finish -- roughness, metalness, every map it wears --
+    and only the colour underneath them changes, which is how a part is picked
+    out of an assembly without pretending it is made of something else.
+
+    A Base Color driven by a texture cannot simply be overwritten: the value
+    behind a link is ignored. The texture is multiplied by the colour instead,
+    which is exactly what three.js does to `map` when `material.color` is set --
+    so a textured part tints in the file the way it tinted in the preview.
+    """
+    r, g, b = hex_to_linear(color)
+    mat.diffuse_color = (r, g, b, mat.diffuse_color[3])
+    if not mat.use_nodes or mat.node_tree is None:
+        return
+    for node in list(mat.node_tree.nodes):
+        if node.type != "BSDF_PRINCIPLED":
+            continue
+        socket = node.inputs.get("Base Color")
+        if socket is None:
+            continue
+        if not socket.is_linked:
+            socket.default_value = (r, g, b, 1.0)
+            continue
+        tint = make_multiply_node(mat.node_tree, (r, g, b))
+        if tint is None:  # no mix node this build knows: leave the texture be
+            continue
+        source, output = socket.links[0].from_socket, tint[0]
+        mat.node_tree.links.new(tint[1], source)
+        mat.node_tree.links.new(socket, output)
+
+
+def make_multiply_node(tree, rgb):
+    """A node multiplying one input colour by ``rgb``: ``(output, input)``.
+
+    Blender replaced MixRGB with a general Mix node, and which of the two a
+    build has moved across releases -- so whichever is registered is used, and
+    the sockets are taken by index because the general node names several of
+    them the same thing.
+    """
+    for kind in ("ShaderNodeMix", "ShaderNodeMixRGB"):
+        try:
+            node = tree.nodes.new(kind)
+        except RuntimeError:
+            continue
+        node.blend_type = "MULTIPLY"
+        if kind == "ShaderNodeMix":
+            node.data_type = "RGBA"
+            # Factor, then the two colour inputs; RGBA sockets sit after the
+            # float and vector ones, which is why these are found by type.
+            colours = [s for s in node.inputs if s.type == "RGBA"]
+            node.inputs[0].default_value = 1.0
+            colours[1].default_value = (*rgb, 1.0)
+            out = [s for s in node.outputs if s.type == "RGBA"][0]
+            return out, colours[0]
+        node.inputs["Fac"].default_value = 1.0
+        node.inputs["Color2"].default_value = (*rgb, 1.0)
+        return node.outputs["Color"], node.inputs["Color1"]
+    return None
+
+
+def fade_object(ob, alpha, color=None):
+    """Fade or recolour one object without replacing how it is shaded.
+
+    A preset swaps a part's materials outright; opacity and colour on their own
+    have to keep them, because the whole point of fading a housing is to look at
+    what is inside it *through* its own finish, and of recolouring a part is to
+    find it without restyling it. Mesh data and materials are both routinely
+    shared between objects, so each is forked before it is touched -- otherwise
+    fading one part fades every part instanced from the same mesh.
     """
     if ob.type != "MESH" or ob.data is None:
         return False
@@ -458,15 +521,17 @@ def fade_object(ob, alpha):
         ob.data = ob.data.copy()
     if not ob.data.materials:
         # Nothing to fade a copy of -- most CAD and STL input arrives this way.
-        ob.data.materials.append(
-            build_material(ob.name + "_material", NEUTRAL, "#cccccc", alpha))
+        ob.data.materials.append(build_material(
+            ob.name + "_material", NEUTRAL, color or "#cccccc", alpha))
         return True
     for slot, mat in enumerate(ob.data.materials):
         if mat is None:
             continue
-        faded = mat.copy()
-        set_alpha(faded, alpha)
-        ob.data.materials[slot] = faded
+        own = mat.copy()
+        set_alpha(own, alpha)
+        if color is not None:
+            set_base_color(own, color)
+        ob.data.materials[slot] = own
     return True
 
 
@@ -558,11 +623,15 @@ def apply_edits(mapping):
             for child in ob.children_recursive:
                 hit = assign_material(child, mat) or hit
             styled += 1 if hit else 0
-        elif alpha < 1.0:
-            hit = fade_object(ob, alpha)
-            for child in ob.children_recursive:
-                hit = fade_object(child, alpha) or hit
-            styled += 1 if hit else 0
+        else:
+            # No preset: fade and recolour what the part already wears, rather
+            # than standing something else in front of it.
+            tint = edit.get("color") if edit.get("recolor") else None
+            if alpha < 1.0 or tint is not None:
+                hit = fade_object(ob, alpha, tint)
+                for child in ob.children_recursive:
+                    hit = fade_object(child, alpha, tint) or hit
+                styled += 1 if hit else 0
 
     bpy.context.view_layer.update()
     return applied, styled, missing
@@ -578,9 +647,23 @@ def apply_edits(mapping):
 FPS = 30
 
 
+def _shape(k, ease):
+    """The fraction travelled, given the fraction of the way through in time.
+
+    Mirrors ``shape`` in frontend/src/animation.ts. ``smooth`` is a smoothstep,
+    leaving a key and arriving at the next one gently; ``hold`` does not travel,
+    so the part sits at its key until the next one takes over.
+    """
+    if ease == "hold":
+        return 0.0
+    if ease == "smooth":
+        return k * k * (3.0 - 2.0 * k)
+    return k
+
+
 def sample_pose(keys, t):
     """The pose a track is in ``t`` seconds in: held before the first key and
-    after the last, blended in a straight line between neighbours.
+    after the last, blended between neighbours along the earlier key's ease.
 
     Mirrors ``poseAt`` in frontend/src/animation.ts, which is what the viewer
     drew -- the two have to agree or the file plays differently from the preview.
@@ -594,6 +677,7 @@ def sample_pose(keys, t):
             break
     span = b["time"] - a["time"]
     k = 0.0 if span <= 0 else (t - a["time"]) / span
+    k = _shape(k, a.get("ease"))
     return {
         field: [a[field][i] + (b[field][i] - a[field][i]) * k for i in range(3)]
         for field in ("move", "rotate", "scale")
