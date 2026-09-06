@@ -275,6 +275,44 @@ def apply_center(mode):
     bpy.context.view_layer.update()
 
 
+def apply_removals(names):
+    """Delete whole parts from the scene before anything else touches them.
+
+    A part is removed with everything hanging off it: a glTF part is routinely a
+    node with its meshes as children, and leaving those behind would export the
+    geometry the user just deleted under a different name.
+
+    Returns ``(removed, missing)`` -- a name with no object behind it is
+    reported rather than passed over, for the same reason an edit's is.
+    """
+    if not names:
+        return 0, []
+
+    doomed = []
+    missing = []
+    for name in names:
+        ob = bpy.data.objects.get(name)
+        if ob is None:
+            missing.append(name)
+            continue
+        doomed.append(ob)
+        doomed.extend(ob.children_recursive)
+
+    # One object can be reached twice -- as a name of its own and as a child of
+    # another doomed part -- and removing it twice is a crash, not a no-op.
+    seen = set()
+    removed = 0
+    for ob in doomed:
+        if ob.name in seen:
+            continue
+        seen.add(ob.name)
+        bpy.data.objects.remove(ob, do_unlink=True)
+        removed += 1
+
+    bpy.context.view_layer.update()
+    return removed, missing
+
+
 def apply_renames(mapping):
     """Rename objects before export, so the names travel into the output file.
 
@@ -348,13 +386,42 @@ def hex_to_linear(value):
     return out
 
 
-def build_material(name, settings, color):
+def set_alpha(mat, alpha):
+    """Dial one material's opacity down, and let the exporter know it blends.
+
+    Both blend properties are set. Blender grew a second one with EEVEE Next
+    and which of the two the glTF exporter reads has moved between releases,
+    so writing only one is a coin toss on the alpha mode reaching the file.
+    """
+    if alpha >= 1.0:
+        return
+    for prop, value in (("blend_method", "BLEND"),
+                        ("surface_render_method", "BLENDED")):
+        if hasattr(mat, prop):
+            setattr(mat, prop, value)
+    if mat.use_nodes and mat.node_tree is not None:
+        for node in mat.node_tree.nodes:
+            if node.type != "BSDF_PRINCIPLED":
+                continue
+            socket = node.inputs.get("Alpha")
+            # A linked alpha is driven by a texture; overriding the value would
+            # be ignored anyway, and unlinking it would throw the texture away.
+            if socket is not None and not socket.is_linked:
+                socket.default_value = alpha
+    mat.diffuse_color = (*mat.diffuse_color[:3], alpha)
+
+
+def build_material(name, settings, color, alpha=1.0, metallic=None, roughness=None):
     mat = bpy.data.materials.new(name=name)
     mat.use_nodes = True
     bsdf = mat.node_tree.nodes.get("Principled BSDF")
     if bsdf is None:  # a factory-startup node tree always has one
         return mat
-    metallic, roughness, transmission, emission = settings
+    preset_metallic, preset_roughness, transmission, emission = settings
+    if metallic is None:
+        metallic = preset_metallic
+    if roughness is None:
+        roughness = preset_roughness
     r, g, b = hex_to_linear(color)
     bsdf.inputs["Base Color"].default_value = (r, g, b, 1.0)
     bsdf.inputs["Metallic"].default_value = metallic
@@ -362,7 +429,36 @@ def build_material(name, settings, color):
     bsdf.inputs["Transmission Weight"].default_value = transmission
     bsdf.inputs["Emission Color"].default_value = (r, g, b, 1.0)
     bsdf.inputs["Emission Strength"].default_value = emission
+    bsdf.inputs["Alpha"].default_value = alpha
+    set_alpha(mat, alpha)
     return mat
+
+
+def fade_object(ob, alpha):
+    """Make one object see-through without replacing how it is shaded.
+
+    A preset swaps a part's materials outright; opacity on its own has to keep
+    them, because the whole point of fading a housing is to look at what is
+    inside it *through* its own finish. Mesh data and materials are both
+    routinely shared between objects, so each is forked before it is touched --
+    otherwise fading one part fades every part instanced from the same mesh.
+    """
+    if ob.type != "MESH" or ob.data is None:
+        return False
+    if ob.data.users > 1:
+        ob.data = ob.data.copy()
+    if not ob.data.materials:
+        # Nothing to fade a copy of -- most CAD and STL input arrives this way.
+        ob.data.materials.append(
+            build_material(ob.name + "_material", NEUTRAL, "#cccccc", alpha))
+        return True
+    for slot, mat in enumerate(ob.data.materials):
+        if mat is None:
+            continue
+        faded = mat.copy()
+        set_alpha(faded, alpha)
+        ob.data.materials[slot] = faded
+    return True
 
 
 def assign_material(ob, mat):
@@ -443,12 +539,20 @@ def apply_edits(mapping):
         applied += 1
 
         kind = edit.get("material") or ""
+        alpha = edit.get("opacity")
+        alpha = 1.0 if alpha is None else max(0.0, min(1.0, float(alpha)))
         if kind in MATERIALS:
             mat = build_material(ob.name + "_material", MATERIALS[kind],
-                                 edit.get("color") or "#cccccc")
+                                 edit.get("color") or "#cccccc", alpha,
+                                 edit.get("metalness"), edit.get("roughness"))
             hit = assign_material(ob, mat)
             for child in ob.children_recursive:
                 hit = assign_material(child, mat) or hit
+            styled += 1 if hit else 0
+        elif alpha < 1.0:
+            hit = fade_object(ob, alpha)
+            for child in ob.children_recursive:
+                hit = fade_object(child, alpha) or hit
             styled += 1 if hit else 0
 
     bpy.context.view_layer.update()
@@ -506,6 +610,18 @@ def main():
         emit("info", message="Relinked " + str(relinked) + " texture(s) by filename")
 
     emit("stats", source=scene_stats())
+
+    dropped, gone = apply_removals(o.get("remove") or [])
+    if dropped:
+        emit("info", message="Removed " + str(dropped) + " object(s)")
+    if gone:
+        emit("warn", message="No part named " + ", ".join(
+            "'" + n + "'" for n in gone[:5]) + (
+            " (and " + str(len(gone) - 5) + " more)" if len(gone) > 5 else "")
+            + " -- those parts were not removed")
+    if not bpy.data.objects:
+        emit("error", message="every part was removed -- nothing left to export")
+        sys.exit(3)
 
     edited, styled, missing = apply_edits(o.get("edits") or {})
     if edited:

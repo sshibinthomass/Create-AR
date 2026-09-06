@@ -14,6 +14,9 @@ REPO_DIR = BACKEND_DIR.parent
 # Where uploads and results live. Overridable so deployments can point at a volume.
 DATA_DIR = Path(os.environ.get("CONVERTER_DATA_DIR", BACKEND_DIR / "data")).resolve()
 JOBS_DIR = DATA_DIR / "jobs"
+# The key that the API keys in settings.json are sealed with. Kept beside them
+# unless CONVERTER_SECRET_KEY supplies it, in which case nothing is written.
+SECRET_KEY_PATH = DATA_DIR / "secret.key"
 
 BLENDER_SCRIPT = Path(__file__).resolve().parent / "blender_job.py"
 

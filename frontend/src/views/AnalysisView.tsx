@@ -5,6 +5,7 @@ import {
   type PartEdit, type PartsDoc,
 } from '../api'
 import Dropzone from '../components/Dropzone'
+import PartDialog from '../components/PartDialog'
 import PartEditor from '../components/PartEditor'
 import PartPreview from '../components/PartPreview'
 import { useConversion } from '../useConversion'
@@ -42,8 +43,15 @@ export default function AnalysisView({
   // 'model' saves the converted file alone; 'bundle' zips it with parts.json.
   const [wrap, setWrap] = useState<'model' | 'bundle'>('model')
   const [edits, setEdits] = useState<Record<string, PartEdit>>({})
+  // Parts left out of the saved model, by their name in the file. Kept as a
+  // list rather than dropped from `parts`: everything else here -- the previews'
+  // indices, the names an edit is stored under, the parts document -- is keyed
+  // on the file's own set of parts, and deleting is undoable until you save.
+  const [removed, setRemoved] = useState<string[]>([])
   const [reach, setReach] = useState(1)
   const [selected, setSelected] = useState<string[]>([])
+  // The part opened full size in its own dialog, by its name in the file.
+  const [opened, setOpened] = useState<string | null>(null)
   const [target, setTarget] = useState('.glb')
   const list = useRef<HTMLDivElement>(null)
 
@@ -59,7 +67,9 @@ export default function AnalysisView({
     setRenames({})
     setDetails({})
     setEdits({})
+    setRemoved([])
     setSelected([])
+    setOpened(null)
     clearExport(null)
   }, [clearExport])
 
@@ -81,6 +91,9 @@ export default function AnalysisView({
       scale: axis((e) => e.scale, 1),
       material: same((e) => e.material, ''),
       color: same((e) => e.color, NO_EDIT.color),
+      opacity: same((e) => e.opacity, NO_EDIT.opacity),
+      roughness: same((e) => e.roughness, NO_EDIT.roughness),
+      metalness: same((e) => e.metalness, NO_EDIT.metalness),
     }
   }, [selected, edits])
 
@@ -99,12 +112,20 @@ export default function AnalysisView({
         const kept = (to: keyof Pick<PartEdit, 'move' | 'rotate' | 'scale'>) =>
           next[to].map((v, i) => (v === shared[to][i] ? own[to][i] : v)) as
             [number, number, number]
+        // Every scalar follows the same rule as the axes: a value the panel is
+        // still showing as the group's own is one the user has not touched.
+        const held = <K extends 'material' | 'color' | 'opacity' | 'roughness' | 'metalness'>(
+          to: K,
+        ) => (next[to] === shared[to] ? own[to] : next[to])
         copy[name] = {
           move: kept('move'),
           rotate: kept('rotate'),
           scale: kept('scale'),
-          material: next.material === shared.material ? own.material : next.material,
-          color: next.color === shared.color ? own.color : next.color,
+          material: held('material'),
+          color: held('color'),
+          opacity: held('opacity'),
+          roughness: held('roughness'),
+          metalness: held('metalness'),
         }
       }
       return copy
@@ -117,6 +138,37 @@ export default function AnalysisView({
       if (name === null) return additive ? was : []
       if (!additive) return [name]
       return was.includes(name) ? was.filter((n) => n !== name) : [...was, name]
+    })
+  }, [])
+
+  const gone = useMemo(() => new Set(removed), [removed])
+
+  /** Leave a part out of the saved model. Its name and description stay put. */
+  const drop = useCallback((name: string) => {
+    setRemoved((was) => (was.includes(name) ? was : [...was, name]))
+    // A part that is not in the model cannot be the one you are editing.
+    setSelected((was) => was.filter((n) => n !== name))
+  }, [])
+
+  const restore = useCallback((name: string) => {
+    setRemoved((was) => was.filter((n) => n !== name))
+  }, [])
+
+  /** Apply a name and a description typed in the dialog, both at once. */
+  const describePart = useCallback((part: string, name: string, facts: PartDetails) => {
+    setRenames((was) => {
+      const copy = { ...was }
+      // A name that matches the file's own is not a rename -- the same rule the
+      // list's own name field follows.
+      if (!name || name === part) delete copy[part]
+      else copy[part] = name
+      return copy
+    })
+    setDetails((was) => {
+      const copy = { ...was }
+      if (Object.keys(facts).length) copy[part] = facts
+      else delete copy[part]
+      return copy
     })
   }, [])
 
@@ -194,7 +246,9 @@ export default function AnalysisView({
     setRenames({})
     setDetails({})
     setEdits({})
+    setRemoved([])
     setSelected([])
+    setOpened(null)
     exported.setJob(null)
     analysis.start(file, '.glb', DEFAULT_OPTIONS)
   }
@@ -222,21 +276,33 @@ export default function AnalysisView({
     })
   }
 
-  /** Every part, as the document records it: its old name, its new one, and what it is. */
-  const described = useMemo(() => parts.map((name, index) => ({
-    index,
-    originalName: name,
-    name: renames[name] ?? name,
-    details: details[name] ?? {},
-  })), [parts, renames, details])
+  /** Every part, as the document records it: its old name, its new one, and what it is.
+   *
+   * Deleted parts are left out, and the rest are numbered from scratch: the
+   * index describes the model the document is written beside, not the file that
+   * was opened. */
+  const described = useMemo(() => parts
+    .filter((name) => !gone.has(name))
+    .map((name, index) => ({
+      index,
+      originalName: name,
+      name: renames[name] ?? name,
+      details: details[name] ?? {},
+    })), [parts, renames, details, gone])
 
   function save() {
     if (!analysis.job) return
+    // A rename or an edit aimed at a part that is being deleted has nothing to
+    // land on, and sending it would have the job warn about a part the user
+    // deliberately took out.
+    const kept = <T,>(all: Record<string, T>) =>
+      Object.fromEntries(Object.entries(all).filter(([name]) => !gone.has(name)))
     exported.startFrom(analysis.job.id, target, {
       ...DEFAULT_OPTIONS,
       archive_entry: analysis.job.archiveEntry ?? '',
-      renames,
-      edits,
+      renames: kept(renames),
+      edits: kept(edits),
+      remove: removed,
       bundle: wrap === 'bundle',
       part_details: wrap === 'bundle' ? described : undefined,
     })
@@ -275,7 +341,7 @@ export default function AnalysisView({
         </div>
         {analysis.job?.status === 'done' && (
           <div className="stats">
-            <div className="stat"><div className="k">Parts</div><div className="v">{formatCount(parts.length)}</div></div>
+            <div className="stat"><div className="k">Parts</div><div className="v">{formatCount(parts.length - removed.length)}</div></div>
             <div className="stat"><div className="k">Meshes</div><div className="v">{formatCount(stats?.meshes)}</div></div>
             <div className="stat"><div className="k">Triangles</div><div className="v">{formatCount(stats?.triangles)}</div></div>
             <div className="stat"><div className="k">Materials</div><div className="v">{formatCount(stats?.materials)}</div></div>
@@ -290,11 +356,12 @@ export default function AnalysisView({
           <section className="card">
             <div className="card-head">
               <h2>Parts</h2>
-              {(renamed > 0 || adjusted > 0 || selected.length > 1) && (
+              {(renamed > 0 || adjusted > 0 || removed.length > 0 || selected.length > 1) && (
                 <span className="head-note">
                   {[selected.length > 1 && `${selected.length} marked`,
                     renamed && `${renamed} renamed`,
-                    adjusted && `${adjusted} edited`]
+                    adjusted && `${adjusted} edited`,
+                    removed.length && `${removed.length} removed`]
                     .filter(Boolean).join(' · ')}
                 </span>
               )}
@@ -314,6 +381,15 @@ export default function AnalysisView({
                   onClick={() => setEdits({})}
                 >
                   Reset edits
+                </button>
+              )}
+              {removed.length > 0 && (
+                <button
+                  className="head-reset"
+                  title="Put every deleted part back into the model"
+                  onClick={() => setRemoved([])}
+                >
+                  Restore all
                 </button>
               )}
             </div>
@@ -368,12 +444,17 @@ export default function AnalysisView({
               {parts.map((name, i) => (
                 <div
                   key={`${name}-${i}`}
-                  className={`part-row${selected.includes(name) ? ' on' : ''}`}
-                  onClick={(e) => mark(name, e.shiftKey || e.ctrlKey || e.metaKey)}
+                  className={`part-row${selected.includes(name) ? ' on' : ''}${
+                    gone.has(name) ? ' gone' : ''}`}
+                  onClick={(e) => {
+                    if (gone.has(name)) return
+                    mark(name, e.shiftKey || e.ctrlKey || e.metaKey)
+                  }}
                 >
                   <span className="part-n">{i + 1}</span>
                   <input
                     value={renames[name] ?? name}
+                    disabled={gone.has(name)}
                     aria-label={`Name of part ${name || i + 1}`}
                     onChange={(e) => {
                       const next = e.target.value
@@ -385,10 +466,10 @@ export default function AnalysisView({
                       })
                     }}
                   />
-                  {isEdited(edits[name]) && (
+                  {isEdited(edits[name]) && !gone.has(name) && (
                     <span className="part-edited" title="This part has been moved, resized or restyled">✎</span>
                   )}
-                  {renames[name] !== undefined && (
+                  {renames[name] !== undefined && !gone.has(name) && (
                     <button
                       className="part-undo"
                       title={`Restore "${name}"`}
@@ -400,6 +481,34 @@ export default function AnalysisView({
                     >
                       ↺
                     </button>
+                  )}
+                  {gone.has(name) ? (
+                    <button
+                      className="part-restore"
+                      title="Put this part back into the model"
+                      onClick={(e) => { e.stopPropagation(); restore(name) }}
+                    >
+                      Restore
+                    </button>
+                  ) : (
+                    <>
+                      {preview && (
+                        <button
+                          className="part-open"
+                          title="Open this part on its own"
+                          onClick={(e) => { e.stopPropagation(); setSelected([name]); setOpened(name) }}
+                        >
+                          ⤢
+                        </button>
+                      )}
+                      <button
+                        className="part-drop"
+                        title="Leave this part out of the saved model"
+                        onClick={(e) => { e.stopPropagation(); drop(name) }}
+                      >
+                        ✕
+                      </button>
+                    </>
                   )}
                 </div>
               ))}
@@ -507,50 +616,6 @@ export default function AnalysisView({
 
       <div className="col">
         <section className="card viewer-card">
-          {/* The selected part on its own, against the assembly on the right:
-              a box around a trim piece says where it is, not what it is. */}
-          {shown && preview && (
-            <PartPreview
-              url={preview}
-              index={shown.at}
-              name={shown.name}
-              edit={edits[selected[0]]}
-            />
-          )}
-
-          {/* What the selected part is, over the model rather than beside it:
-              the name is already on the part, and this is the rest of it. */}
-          {shown && (
-            <aside className="part-card">
-              <div className="part-card-head">
-                <h3>{shown.name}</h3>
-                <button
-                  className="part-card-x"
-                  title="Hide these details"
-                  onClick={() => setSelected([])}
-                >
-                  ×
-                </button>
-              </div>
-              {Object.keys(shown.details).length ? (
-                <dl className="part-facts">
-                  {Object.entries(shown.details).map(([label, text]) => (
-                    <div key={label}>
-                      <dt>{label}</dt>
-                      <dd>{text}</dd>
-                    </div>
-                  ))}
-                </dl>
-              ) : (
-                <p className="part-card-empty">
-                  Nothing is recorded about this part yet. Run <b>Name parts
-                  with AI</b> with descriptions turned on, or open a bundle that
-                  already has them.
-                </p>
-              )}
-            </aside>
-          )}
-
           <Suspense fallback={<div className="viewer"><div className="viewer-empty">Loading viewer…</div></div>}>
             <ModelViewer
               key={preview ?? 'empty'}
@@ -558,6 +623,7 @@ export default function AnalysisView({
               explodeOpen
               labels={renames}
               edits={edits}
+              hidden={removed}
               selected={selected}
               onSelect={mark}
               onEdit={(changes) => setEdits((e) => ({ ...e, ...changes }))}
@@ -570,7 +636,66 @@ export default function AnalysisView({
                     ? 'Preparing the model…'
                     : 'Upload a model to take it apart.'
               }
-            />
+            >
+              {/* Both panels live inside the viewer, so filling the window
+                  carries them along instead of burying them under it. */}
+
+              {/* The selected part on its own, against the assembly on the
+                  right: a box around a trim piece says where it is, not what
+                  it is. */}
+              {shown && preview && (
+                <PartPreview
+                  url={preview}
+                  index={shown.at}
+                  name={shown.name}
+                  edit={edits[selected[0]]}
+                  onOpen={() => setOpened(selected[0])}
+                />
+              )}
+
+              {/* What the selected part is, over the model rather than beside
+                  it: the name is already on the part, and this is the rest. */}
+              {shown && (
+                <aside className="part-card">
+                  <div className="part-card-head">
+                    <h3>{shown.name}</h3>
+                    {preview && (
+                      <button
+                        className="part-card-open"
+                        title="Open this part on its own, to name, describe and edit it"
+                        onClick={() => setOpened(selected[0])}
+                      >
+                        ⤢
+                      </button>
+                    )}
+                    <button
+                      className="part-card-x"
+                      title="Hide these details"
+                      onClick={() => setSelected([])}
+                    >
+                      ×
+                    </button>
+                  </div>
+                  {Object.keys(shown.details).length ? (
+                    <dl className="part-facts">
+                      {Object.entries(shown.details).map(([label, text]) => (
+                        <div key={label}>
+                          <dt>{label}</dt>
+                          <dd>{text}</dd>
+                        </div>
+                      ))}
+                    </dl>
+                  ) : (
+                    <p className="part-card-empty">
+                      Nothing is recorded about this part yet. Open the part on
+                      its own to write a description or ask the model for one,
+                      run <b>Name parts with AI</b> over the lot, or open a
+                      bundle that already has them.
+                    </p>
+                  )}
+                </aside>
+              )}
+            </ModelViewer>
           </Suspense>
 
           {(analysis.busy || analysis.uploading) && (
@@ -586,6 +711,32 @@ export default function AnalysisView({
           )}
         </section>
       </div>
+
+      {opened !== null && preview && parts.includes(opened) && (
+        <PartDialog
+          url={preview}
+          index={parts.indexOf(opened)}
+          total={parts.length}
+          originalName={opened}
+          name={renames[opened] ?? opened}
+          details={details[opened] ?? {}}
+          edit={edits[opened]}
+          extent={reach}
+          settings={settings}
+          taken={parts.filter((n) => n !== opened).map((n) => renames[n] ?? n)}
+          removed={gone.has(opened)}
+          onSave={(name, facts) => describePart(opened, name, facts)}
+          onEdit={(next) => setEdits((all) => ({ ...all, [opened]: next }))}
+          onResetEdit={() => setEdits((all) => {
+            const copy = { ...all }
+            delete copy[opened]
+            return copy
+          })}
+          onRemove={() => drop(opened)}
+          onRestore={() => restore(opened)}
+          onClose={() => setOpened(null)}
+        />
+      )}
     </div>
   )
 }

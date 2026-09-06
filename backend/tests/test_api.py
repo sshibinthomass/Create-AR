@@ -164,6 +164,33 @@ def glb_node(data: bytes, name: str) -> dict:
     pytest.fail(f"no node named {name!r} in the GLB")
 
 
+def make_glb(*names: str) -> bytes:
+    """A GLB of one triangle drawn once per name -- the smallest many-part model.
+
+    Every fixture that ships with the tests is a single part, and a removal has
+    nothing to prove on a model with one of them: the interesting case is the
+    parts that stay behind.
+    """
+    tri = struct.pack("<9f", 0, 0, 0, 1, 0, 0, 0, 1, 0)
+    doc = {
+        "asset": {"version": "2.0"},
+        "scene": 0,
+        "scenes": [{"nodes": list(range(len(names)))}],
+        "nodes": [{"name": name, "mesh": 0} for name in names],
+        "meshes": [{"primitives": [{"attributes": {"POSITION": 0}}]}],
+        "accessors": [{"bufferView": 0, "componentType": 5126, "count": 3,
+                       "type": "VEC3", "min": [0, 0, 0], "max": [1, 1, 0]}],
+        "bufferViews": [{"buffer": 0, "byteOffset": 0, "byteLength": len(tri)}],
+        "buffers": [{"byteLength": len(tri)}],
+    }
+    body = json.dumps(doc).encode()
+    body += b" " * (-len(body) % 4)
+    blob = tri + bytes(-len(tri) % 4)
+    chunks = (struct.pack("<II", len(body), 0x4E4F534A) + body
+              + struct.pack("<II", len(blob), 0x004E4942) + blob)
+    return struct.pack("<4sII", b"glTF", 2, 12 + len(chunks)) + chunks
+
+
 def glb_material(data: bytes, node: dict) -> dict:
     """The material on a node's first mesh primitive."""
     doc = glb_doc(data)
@@ -433,6 +460,130 @@ def test_reexport_moves_scales_and_restyles_a_part():
     assert pbr["baseColorFactor"] == pytest.approx([1.0, 0.0, 0.0, 1.0], abs=1e-3)
     # glTF omits metallicFactor when it is 1.0, which is what "metal" means.
     assert pbr.get("metallicFactor", 1.0) == pytest.approx(1.0)
+
+
+def test_opacity_and_finish_are_part_of_an_edit():
+    from app.main import Options
+
+    # Fading a part is an edit in its own right, with no material chosen.
+    opts = Options(edits={"clear": {"opacity": 0.4}})
+    assert set(opts.edits) == {"clear"}
+    # A material with no finish given falls back to the preset's own.
+    opts = Options(edits={"a": {"material": "metal"}})
+    assert opts.edits["a"].roughness is None
+    assert opts.edits["a"].metalness is None
+
+    with pytest.raises(ValidationError):
+        Options(edits={"a": {"opacity": 0.0}})    # invisible is deletion, not an edit
+    with pytest.raises(ValidationError):
+        Options(edits={"a": {"opacity": 1.5}})
+    with pytest.raises(ValidationError):
+        Options(edits={"a": {"roughness": -0.1}})
+    with pytest.raises(ValidationError):
+        Options(edits={"a": {"metalness": 2.0}})
+
+
+@needs_blender
+def test_reexport_fades_a_part_that_keeps_its_own_material():
+    job = run_job("pair.glb", make_glb("Housing", "Cover"), ".glb")
+    r = client.post(
+        f"/api/jobs/{job['id']}/reexport",
+        data={"target": ".glb",
+              "options": json.dumps({"edits": {"Cover": {"opacity": 0.35}}})},
+    )
+    again = await_job(r.json()["id"])
+    assert again["status"] == "done", again["error"]
+
+    data = client.get(f"/api/jobs/{again['id']}/download").content
+    material = glb_material(data, glb_node(data, "Cover"))
+    assert material.get("alphaMode") == "BLEND", material
+    assert material["pbrMetallicRoughness"]["baseColorFactor"][3] == pytest.approx(
+        0.35, abs=1e-3)
+    # Fading one part gives that part a material to fade; the part left alone
+    # keeps the nothing it arrived with rather than being dragged along.
+    doc = glb_doc(data)
+    housing = doc["meshes"][glb_node(data, "Housing")["mesh"]]["primitives"][0]
+    assert "material" not in housing, housing
+
+
+@needs_blender
+def test_reexport_writes_the_finish_sliders_onto_a_preset():
+    job = run_job("pair.glb", make_glb("Housing", "Cover"), ".glb")
+    r = client.post(
+        f"/api/jobs/{job['id']}/reexport",
+        data={"target": ".glb", "options": json.dumps({"edits": {"Housing": {
+            "material": "metal", "color": "#3366ff",
+            "roughness": 0.8, "metalness": 0.2, "opacity": 0.5}}})},
+    )
+    again = await_job(r.json()["id"])
+    assert again["status"] == "done", again["error"]
+
+    data = client.get(f"/api/jobs/{again['id']}/download").content
+    material = glb_material(data, glb_node(data, "Housing"))
+    pbr = material["pbrMetallicRoughness"]
+    # The sliders win over the preset's own 0.25 / 1.0.
+    assert pbr["roughnessFactor"] == pytest.approx(0.8, abs=1e-3)
+    assert pbr["metallicFactor"] == pytest.approx(0.2, abs=1e-3)
+    assert material.get("alphaMode") == "BLEND", material
+    assert pbr["baseColorFactor"][3] == pytest.approx(0.5, abs=1e-3)
+
+
+def test_removals_are_deduplicated_and_capped():
+    from app.main import Options
+
+    opts = Options(remove=["hub", "hub", "", "spoke"])
+    # Order is kept, so the job log reads the way the list did.
+    assert opts.remove == ["hub", "spoke"]
+
+    with pytest.raises(ValidationError):
+        Options(remove=[f"p{i}" for i in range(501)])
+
+
+@needs_blender
+def test_reexport_drops_a_removed_part_and_keeps_the_rest():
+    job = run_job("pair.glb", make_glb("Housing", "Cover"), ".glb")
+    assert job["status"] == "done", job["error"]
+    assert set(glb_node_names(
+        client.get(f"/api/jobs/{job['id']}/download").content)) >= {"Housing", "Cover"}
+
+    r = client.post(
+        f"/api/jobs/{job['id']}/reexport",
+        data={"target": ".glb", "options": json.dumps({"remove": ["Cover"]})},
+    )
+    assert r.status_code == 202, r.text
+    again = await_job(r.json()["id"])
+    assert again["status"] == "done", again["error"]
+
+    names = glb_node_names(client.get(f"/api/jobs/{again['id']}/download").content)
+    assert "Housing" in names
+    assert "Cover" not in names
+
+
+@needs_blender
+def test_removing_a_part_that_is_not_there_warns_and_exports_anyway():
+    job = run_job("pair.glb", make_glb("Housing", "Cover"), ".glb")
+    r = client.post(
+        f"/api/jobs/{job['id']}/reexport",
+        data={"target": ".glb", "options": json.dumps({"remove": ["Flywheel"]})},
+    )
+    again = await_job(r.json()["id"])
+    assert again["status"] == "done", again["error"]
+    assert any("Flywheel" in w for w in again["warnings"]), again["warnings"]
+    assert "Housing" in glb_node_names(
+        client.get(f"/api/jobs/{again['id']}/download").content)
+
+
+@needs_blender
+def test_removing_every_part_fails_rather_than_writing_an_empty_model():
+    job = run_job("pair.glb", make_glb("Housing", "Cover"), ".glb")
+    r = client.post(
+        f"/api/jobs/{job['id']}/reexport",
+        data={"target": ".glb",
+              "options": json.dumps({"remove": ["Housing", "Cover"]})},
+    )
+    again = await_job(r.json()["id"])
+    assert again["status"] == "error"
+    assert "removed" in (again["error"] or "").lower(), again["error"]
 
 
 @needs_blender

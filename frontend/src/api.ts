@@ -101,6 +101,21 @@ export interface PartEdit {
   scale: [number, number, number]
   material: MaterialType
   color: string                     // '#rrggbb'
+  /**
+   * How solid the part is. 1 is the part as the file has it.
+   *
+   * The one styling that does not need a preset: seeing through a housing is
+   * worth doing *without* throwing away the finish you are looking through, so
+   * with no preset chosen the part keeps its own materials and only fades.
+   */
+  opacity: number
+  /**
+   * Where the chosen preset is nudged to. Both are seeded from the preset the
+   * moment one is picked, and mean nothing without one -- there is no telling
+   * what the file's own shading was, so there is no value that means "leave it".
+   */
+  roughness: number
+  metalness: number
 }
 
 /** Principled BSDF settings per material, mirroring MATERIALS in blender_job.py. */
@@ -120,10 +135,16 @@ export const MATERIALS: Record<Exclude<MaterialType, ''>, {
 
 export const NO_EDIT: PartEdit = {
   move: [0, 0, 0], rotate: [0, 0, 0], scale: [1, 1, 1], material: '', color: '#9aa6c0',
+  opacity: 1,
+  roughness: MATERIALS.plastic.roughness, metalness: MATERIALS.plastic.metalness,
 }
 
+/** Whether an edit changes how the part is shaded, as opposed to where it sits. */
+export const isRestyled = (e: PartEdit | undefined): boolean =>
+  e != null && (e.material !== '' || e.opacity < 1)
+
 export const isEdited = (e: PartEdit | undefined): boolean =>
-  e != null && (e.material !== ''
+  e != null && (isRestyled(e)
     || e.move.some((v) => v !== 0) || e.rotate.some((v) => v !== 0)
     || e.scale.some((v) => v !== 1))
 
@@ -146,6 +167,8 @@ export interface ConvertOptions {
   renames?: Record<string, string>
   /** Part name -> the move, rotation, scale and material to apply to it. */
   edits?: Record<string, PartEdit>
+  /** Parts to drop from the model entirely, by the name the file gives them. */
+  remove?: string[]
   /** Write parts.json beside the model and zip the two together. */
   bundle?: boolean
   part_details?: PartsDocEntry[]

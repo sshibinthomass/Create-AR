@@ -199,6 +199,17 @@ JSON object and given the reply's shape in the prompt; Anthropic is handed a
 JSON schema to enforce, and its refusals are reported rather than parsed as a
 name.
 
+**Not every OpenAI-shaped model takes the same parameters.** The o-series and
+GPT-5 renamed `max_tokens` to `max_completion_tokens` and will not have
+`temperature` set at all, while DeepSeek and the other compatible servers know
+only the older spelling. Which applies cannot be read off the model's name — an
+Azure deployment is called whatever its owner called it, and a compatible
+endpoint may be serving anything — so it is not guessed at. The first request
+is sent as normal, and a refusal that names the parameter it will not take is
+retried with that one changed and the answer remembered for the rest of the
+run. A refusal about anything else — a bad key, a model that does not
+exist — is reported as it stands rather than retried.
+
 ### Settings
 
 The **gear** in the top-right corner opens them — provider and its credentials,
@@ -209,7 +220,47 @@ the jobs live in), so they survive a restart and never reach the repository.
 
 An API key is write-only from the browser: the server never sends one back, only
 which providers it holds a key for, so saving with a key field blank keeps the
-stored key and forgetting one is its own button.
+stored key and forgetting one is its own button. A blank key field is therefore
+not an empty setting — the dot beside a provider and the field's placeholder are
+how a stored key shows itself, since showing the key would undo the reason it is
+only ever written.
+
+### Where it all lives, and what is encrypted
+
+Everything stays on the machine running the backend. `settings.json` sits in the
+data directory, which is git-ignored *and* listed in `.dockerignore`, so it
+reaches neither the repository nor an image. Nothing is sent anywhere else: the
+keys are read back only to authenticate the request to whichever provider you
+picked.
+
+The keys in that file are **encrypted** rather than written in the clear —
+Fernet (AES-128-CBC with an HMAC), one sealed value per key, marked `enc:v1:`.
+That is what stops a copy of the file from being a copy of the key: a backup, a
+synced folder, a container built with the data directory in it, a
+`cat settings.json` pasted into a bug report.
+
+Be clear about what it does *not* do. The master key is written beside the
+settings as `secret.key` with owner-only permissions, because the app has to
+start unattended, so anyone who can already read the data directory can read
+both. To close that gap, put the master key somewhere else:
+
+```bash
+CONVERTER_SECRET_KEY="<a Fernet key>"
+```
+
+With that set, nothing on disk decrypts on its own — hand it in from a real
+secret store, a systemd credential or a Docker secret, and no key file is
+written at all. Generate one with:
+
+```bash
+python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+```
+
+A settings file written before the keys were encrypted still loads, and is
+sealed the first time it is read rather than waiting for someone to press Save.
+A key that will not decrypt — a data directory copied without its key, a rotated
+master key — reads as *absent* rather than raising: the page then shows that
+provider as having no key, which is both true and fixable by typing it again.
 
 On a fresh install the Azure fields are seeded from `AZURE_OPENAI_ENDPOINT`,
 `AZURE_OPENAI_API_KEY`, `AZURE_OPENAI_DEPLOYMENT` and `AZURE_OPENAI_API_VERSION`,
@@ -249,6 +300,43 @@ or stretch it and it turns and stretches. Both the panel and the viewer compose
 an edit through the same code, which is what keeps them agreeing with each other
 and with the exporter. A *move* is the one edit it cannot show — the framing
 follows the part, so sliding the part around leaves the picture unchanged.
+
+### One part at a time
+
+Clicking that preview — or the ⤢ on the part's row, or on its details
+card — opens the part on its own, full size, which is where a single component
+is worked on rather than a whole assembly:
+
+- **A view you can turn.** Drag to orbit the part, scroll to zoom, arrow keys
+  if you would rather not drag, and **Recentre** to go back to where it
+  started. This moves *the camera*, not the part — turning the part itself is
+  what the rotate sliders do, and that is an edit that gets saved. The angle is
+  kept while you work on the same component, so nudging a slider does not snap
+  the view back to the front; picking a different part starts square-on again.
+
+- **Its name and its description, as fields.** The description is a list of
+  label/text pairs, added and dropped one at a time, because that is the shape
+  the document stores and the shape the model answers in. Both are a draft until
+  **Save name & description**, and the dialog says *Unsaved* while they differ
+  from the part.
+- **Describe with AI** points the namer at this one part instead of the model.
+  It renders the part, sends it with how many parts the model has and what the
+  others are called, and writes the answer *into the draft* — so a generated
+  name and description are edited and saved like any typed ones. Correcting one
+  part costs one request, not another run over the assembly.
+- **The same move, rotate, scale and restyling sliders** as the panel under the
+  list — including opacity — applied live, with the view beside them redrawing
+  as you drag.
+- **Delete part**, which leaves the component out of the model you save.
+
+Deleting is a mark, not a cut. The part is hidden in the viewer, struck through
+in the list and left out of `parts.json`, but it stays in the file you opened
+and in the list — **Restore** on its row, or **Restore all** above the list,
+puts it back, and its name, description and edits are all still on it when it
+returns. Only on save does the object actually go, along with everything
+parented under it; the names and edits belonging to a deleted part are dropped
+from the request rather than sent to land on nothing. A save that would remove
+every part fails instead of writing an empty model.
 
 ### Two kinds of export
 
@@ -312,9 +400,31 @@ set of parts and rotating them is meant to do.
 
 Marking a part also opens an editor under the list, for changing those parts
 rather than the whole model: **move** it along each axis, **rotate** it, **scale**
-it per axis, and give it a **material** and a colour. The viewer shows every
-change as it is made, and pressing **Save as** writes them into the file along
-with the names.
+it per axis, and restyle it. The viewer shows every change as it is made, and
+pressing **Save as** writes them into the file along with the names. The same
+editor sits in a part's own dialog, so one component can be worked on without
+hunting for it in the list.
+
+Restyling is a **material** preset with a **colour**, and three sliders:
+
+| | |
+|---|---|
+| **Opaque** | How solid the part is, down to 5%. |
+| **Rough** | How diffuse its finish is. |
+| **Metal** | How metallic it is. |
+
+Opacity is the one that needs no preset. Turning a housing see-through in order
+to look at what is inside it should not throw away the housing's own finish, so
+with the type left on *Keep original* the part keeps every material it was
+authored with — textures included — and only fades. Rough and metal are the
+opposite: they override the preset, and mean nothing without one. There is no
+telling what the file shaded a part with, so there is no value they could hold
+that would mean "leave it alone" — they are disabled until a preset is picked,
+and seeded from it the moment one is.
+
+A faded part stops writing depth in the viewer, so what is behind it shows
+through rather than being clipped by draw order, and it is exported with glTF's
+`alphaMode: BLEND`.
 
 Everything in that panel can also be done by hand in the viewport. With a part
 selected, **Move**, **Rotate** and **Scale** in the top-left corner attach a
@@ -354,6 +464,21 @@ is buried the moment it is anchored on the part it edits.
   settings, and the colour you pick is converted from sRGB so the exported file
   is the shade you chose. Leave the type on *Keep original* to move a part
   without touching how it looks.
+- **Fading a part copies what it was shaded with rather than replacing it.**
+  Blender shares materials and mesh data between objects freely, so both are
+  forked before the alpha is touched — otherwise fading one part would fade
+  every part instanced from the same mesh. A part with no material of its own
+  is given a plain one to fade, since there is nothing else to make see-through.
+- **The panels over the viewer live inside it.** Filling the window turns the
+  viewer into a fixed overlay across the whole page; anything left outside it
+  would be buried underneath, which is why the part's details and its preview
+  are children of the viewer rather than siblings.
+- **The thumbnail is a still; the dialog is not.** A thumbnail that grabbed
+  your drag would be worse than one that does not, and encoding a JPEG per
+  frame is no way to run an orbit — so the dialog puts the offscreen renderer's
+  own canvas straight into the page and drives its camera, while the thumbnail
+  goes on asking it for pictures. Both share one studio type, so what you turn
+  is composed by the same code as what you export.
 - **STL and PLY keep neither names nor materials**, but the moves, rotations and
   scales still apply, because those are baked into the geometry that is written.
   OBJ needs every part to carry a material once any part is styled, so unstyled
@@ -371,7 +496,11 @@ is buried the moment it is anchored on the part it edits.
   other value the parts did not happen to share.
 - **An edit that names no part in the model is reported**, not passed over. If a
   save comes back with a warning naming parts, those names no longer match the
-  objects the converter found, and nothing was applied to them.
+  objects the converter found, and nothing was applied to them. A deletion that
+  names no part is reported the same way.
+- **A deleted part is numbered afresh in the document.** `parts.json` describes
+  the model it is written beside, so the indices skip nothing — they run over the
+  parts that were actually exported.
 
 Edits are cleared when a different model is analysed. **Reset** in the editor
 returns the marked parts to how they arrived. Above the list, **Reset names**
@@ -612,9 +741,13 @@ curl -F file=@part.stp -F target=.usdz \
 Conversion options: `scale`, `center` (`none`/`origin`/`floor`), `decimate`,
 `triangulate`, `apply_modifiers`, `animations`, `draco` (GLB), `y_up`
 (USD/USDZ), `cad_tolerance` (STEP/IGES), `archive_entry` to pick a specific
-model inside an archive, `renames` — a `{"old": "new"}` map of part names — and
+model inside an archive, `renames` — a `{"old": "new"}` map of part names —
 `edits`, a map of part name to `{"move": [x, y, z], "rotate": [x, y, z], "scale":
-[x, y, z], "material": "metal", "color": "#ff2200"}`. `bundle` with
+[x, y, z], "material": "metal", "color": "#ff2200", "opacity": 0.5,
+"roughness": 0.8, "metalness": 0.2}`, and `remove`, a list of part names to drop
+from the scene before anything else touches it. `opacity` applies with or
+without a material; `roughness` and `metalness` default to the chosen preset's
+own values when left out. `bundle` with
 `part_details` writes `parts.json` beside the model and zips the two together. Both are applied between
 import and export. Every edit field is a delta on the part's own local transform
 in the viewer's glTF-style Y-up axes, not Blender's Z-up; rotations are in
@@ -650,10 +783,14 @@ backend/app/
   formats.py       single source of truth for supported formats
   jobs.py          in-memory job store + worker pool
   main.py          FastAPI routes
+  settings.py      the naming settings, persisted in the data directory
+  vault.py         sealing the API keys in that file, and what that protects
 frontend/src/
   App.tsx          shell: health/capabilities and the two tabs
   useConversion.ts upload + job polling, shared by both tabs
   views/           ConvertView (format → options → result), AnalysisView
-  components/      Dropzone, OptionsPanel, ModelViewer (three.js + explode)
+  usePartShot.ts   one part rendered alone, for the preview and the dialog
+  components/      Dropzone, OptionsPanel, ModelViewer (three.js + explode),
+                   PartEditor, PartPreview, PartDialog (one part, full size)
 docs/FORMATS.md    what each engine actually provides, and why
 ```

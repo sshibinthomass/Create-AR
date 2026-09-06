@@ -15,6 +15,10 @@ import { saveSettings, type NamerSettings, type Provider } from '../api'
  * already stored and saving with it blank leaves that key alone. Every
  * provider's key is kept even while another is selected, so trying Claude for
  * an afternoon does not cost you the Azure key you had typed in.
+ *
+ * That blank field is not an empty setting: the dot beside a provider and the
+ * placeholder in the field are how a stored key shows itself, since showing
+ * the key would undo the reason it is only ever written.
  */
 
 const PROVIDERS: { id: Provider; label: string; note: string }[] = [
@@ -311,8 +315,12 @@ export default function SettingsView({ settings, onSaved }: {
             {saving ? 'Saving…' : saved ? 'Saved' : 'Save settings'}
           </button>
           <div className="note">
-            Saved on the server, in the data directory alongside the jobs. That
-            directory is git-ignored, so nothing here reaches the repository.
+            Everything here is saved on this machine, in the data directory
+            alongside the jobs, and read back on the next start — nothing needs
+            typing twice. That directory is git-ignored and excluded from the
+            Docker build, so none of it reaches the repository or an image.
+            API keys are encrypted in that file rather than written in the
+            clear, and leave only in the request to the provider you picked.
           </div>
         </div>
       </section>

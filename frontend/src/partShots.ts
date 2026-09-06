@@ -15,14 +15,14 @@
  * its object again, so they cannot be allowed to drift.
  */
 import {
-  ACESFilmicToneMapping, Box3, Color, MeshStandardMaterial, PMREMGenerator,
-  PerspectiveCamera, Scene, Vector3, WebGLRenderer,
+  ACESFilmicToneMapping, Box3, Color, MathUtils, MeshStandardMaterial,
+  PMREMGenerator, PerspectiveCamera, Scene, Spherical, Vector3, WebGLRenderer,
   type Material, type Mesh, type Object3D,
 } from 'three'
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js'
 import { RoomEnvironment } from 'three/examples/jsm/environments/RoomEnvironment.js'
-import type { PartEdit } from './api'
-import { buildMaterial, poseEdited } from './partEdit'
+import { isRestyled, type PartEdit } from './api'
+import { poseEdited, restyleNode } from './partEdit'
 import { fileNames, partNodes, type NameSource } from './partGraph'
 
 export interface PartShot {
@@ -35,22 +35,39 @@ export interface PartShot {
   context: string
 }
 
+/** What a shot is rendered at unless the caller wants a bigger one. */
 const SIZE = 512
 const QUALITY = 0.82
 /** Mid-slate: light parts and dark parts both stand off it. */
 const BACKDROP = '#5a6172'
 /** Where the camera sits relative to whatever it is framing. */
 const EYE = new Vector3(1, 0.72, 1.15).normalize()
+/** The same direction as angles, which is what turning the camera works in. */
+const REST = new Spherical().setFromVector3(EYE)
+/** Straight up and straight down are singular; stop just short of both. */
+const PITCH_LIMIT = 0.02
+/** How far in and out the live view may be pushed, as a factor of the framing. */
+const DOLLY_RANGE: [number, number] = [0.35, 4]
+/** Radians per pixel dragged: a drag across the view is a bit over half a turn. */
+const TURN_PER_PX = 0.008
+/** Wheel notches are exponential, so zooming in and back out lands where it was. */
+const ZOOM_PER_NOTCH = 0.0012
 
-/** Point the camera at a box and back off far enough to hold all of it. */
-function frame(camera: PerspectiveCamera, box: Box3) {
+/**
+ * Point the camera at a box and back off far enough to hold all of it.
+ *
+ * `dir` is where the camera sits relative to the box and `dolly` scales how far
+ * away -- both fixed for a still shot, and driven by the drag for a live one.
+ */
+function frame(camera: PerspectiveCamera, box: Box3, dir = EYE, dolly = 1) {
   const centre = box.getCenter(new Vector3())
   const radius = Math.max(box.getSize(new Vector3()).length() / 2, 1e-6)
-  const distance = (radius / Math.sin((camera.fov * Math.PI) / 360)) * 1.25
-  camera.position.copy(centre).addScaledVector(EYE, distance)
+  const distance = (radius / Math.sin((camera.fov * Math.PI) / 360)) * 1.25 * dolly
+  camera.position.copy(centre).addScaledVector(dir, distance)
   // Both clip planes are pinned to this shot. Models arrive anywhere from a
   // millimetre to a kilometre across, and a fixed near plane swallows the small
-  // ones whole.
+  // ones whole. Measured against the radius rather than the distance so that
+  // dollying all the way in does not clip the part away.
   camera.near = Math.max(distance - radius * 3, distance / 1000)
   camera.far = distance + radius * 3
   camera.lookAt(centre)
@@ -79,6 +96,14 @@ export interface PartStudio {
   /** The parts, in the order the viewer lists them. */
   names: string[]
   /**
+   * What the studio draws on. Square, because the framing below assumes it.
+   *
+   * A caller wanting a still shot never touches this; one wanting a view the
+   * user can turn puts it in the page and drives `show` and `turn` instead of
+   * asking for a JPEG per frame.
+   */
+  canvas: HTMLCanvasElement
+  /**
    * One part alone, framed tight. base64 JPEG, no data: prefix.
    *
    * With an `edit`, the part is posed and restyled the way the viewer is
@@ -89,22 +114,34 @@ export interface PartStudio {
   isolated(index: number, edit?: PartEdit): string
   /** The whole assembly, that part lit orange and the rest ghosted. */
   inContext(index: number): string
+  /**
+   * Put one part on the canvas and leave it there, framed from the resting
+   * angle. Unlike `isolated` the pose and materials stay applied, because the
+   * next thing to happen is usually the user turning the camera around them.
+   */
+  show(index: number, edit?: PartEdit): void
+  /** Turn the camera about the shown part, by a drag in pixels. */
+  turn(dx: number, dy: number): void
+  /** Push the camera in or out, by a wheel delta. */
+  zoom(delta: number): void
+  /** Back to the angle and distance `show` started from. */
+  recentre(): void
   close(): void
 }
 
-export async function openStudio(url: string): Promise<PartStudio | null> {
+export async function openStudio(url: string, size = SIZE): Promise<PartStudio | null> {
   const gltf = await new GLTFLoader().loadAsync(url)
   const nodes = partNodes(gltf.scene)
   if (!nodes.length) return null
   const named = fileNames(gltf.parser as NameSource)
 
   const canvas = document.createElement('canvas')
-  canvas.width = SIZE
-  canvas.height = SIZE
+  canvas.width = size
+  canvas.height = size
   // preserveDrawingBuffer, because the pixels are read back after the render
   // rather than during it.
   const renderer = new WebGLRenderer({ canvas, antialias: true, preserveDrawingBuffer: true })
-  renderer.setSize(SIZE, SIZE, false)
+  renderer.setSize(size, size, false)
   renderer.toneMapping = ACESFilmicToneMapping
 
   const pmrem = new PMREMGenerator(renderer)
@@ -165,49 +202,122 @@ export async function openStudio(url: string): Promise<PartStudio | null> {
     }
   }
 
-  return {
-    names: nodes.map((node, i) => named.get(node) ?? node.name ?? `Part ${i + 1}`),
+  /**
+   * Show one part alone, in whatever pose and materials the edit gives it.
+   *
+   * Returns the box to frame it by and the undo that puts the model back. A
+   * still shot undoes immediately; a live view holds on to it until the next
+   * part is staged, because the pose has to survive every turn of the camera.
+   */
+  const stageOne = (index: number, edit?: PartEdit) => {
+    ghosted(false)
+    for (let j = 0; j < nodes.length; j++) nodes[j].visible = j === index
 
-    isolated(index, edit) {
-      ghosted(false)
-      for (let j = 0; j < nodes.length; j++) nodes[j].visible = j === index
+    const node = nodes[index]
+    const at = rest[index]
+    let made: Material[] = []
+    let swapped = new Map<Mesh, Material | Material[]>()
 
-      const node = nodes[index]
-      const at = rest[index]
-      let made: Material | null = null
-      const swapped = new Map<Mesh, Material | Material[]>()
-
-      if (edit) {
-        poseEdited(node, at.position, at.quaternion, at.scale, edit)
-        node.updateMatrixWorld(true)
-        if (edit.material) {
-          made = buildMaterial(edit)
-          node.traverse((child) => {
-            const mesh = child as Mesh
-            if (!mesh.isMesh) return
-            swapped.set(mesh, mesh.material)
-            mesh.material = made!
-          })
-        }
+    if (edit) {
+      poseEdited(node, at.position, at.quaternion, at.scale, edit)
+      node.updateMatrixWorld(true)
+      if (isRestyled(edit)) {
+        ({ original: swapped, made } = restyleNode(node, edit))
       }
+    }
 
+    return {
       // An edited part has moved, turned or stretched, so its box has to be
       // measured again rather than reused from the rest pose.
-      frame(camera, edit ? new Box3().setFromObject(node) : boxes[index])
-      const shot = shoot()
-
-      if (edit) {
+      box: edit ? new Box3().setFromObject(node) : boxes[index],
+      undo: () => {
+        if (!edit) return
         node.position.copy(at.position)
         node.quaternion.copy(at.quaternion)
         node.scale.copy(at.scale)
         node.updateMatrixWorld(true)
         for (const [mesh, material] of swapped) mesh.material = material
-        made?.dispose()
-      }
+        for (const material of made) material.dispose()
+      },
+    }
+  }
+
+  // What the live view is holding: the part's undo, and the box and angles the
+  // camera is orbiting. Kept out of React on purpose -- a drag redraws from the
+  // pointer handler, not from a state change and a re-render.
+  let live: { undo: () => void; box: Box3 } | null = null
+  // Which part the live view is on, so that re-staging the same one after an
+  // edit keeps the angle it was turned to. Nudging a slider and having the
+  // camera snap back to the front every time makes the view useless for
+  // watching what the slider does.
+  let shown = -1
+  let yaw = 0
+  let pitch = 0
+  let dolly = 1
+
+  const drop = () => {
+    live?.undo()
+    live = null
+  }
+
+  const look = () => {
+    if (!live) return
+    const dir = new Vector3().setFromSphericalCoords(
+      1,
+      MathUtils.clamp(REST.phi + pitch, PITCH_LIMIT, Math.PI - PITCH_LIMIT),
+      REST.theta + yaw,
+    )
+    frame(camera, live.box, dir, dolly)
+    renderer.render(stage, camera)
+  }
+
+  return {
+    names: nodes.map((node, i) => named.get(node) ?? node.name ?? `Part ${i + 1}`),
+    canvas,
+
+    isolated(index, edit) {
+      // A still shot is taken from the resting angle, never through whatever
+      // the live view happens to be turned to.
+      drop()
+      const held = stageOne(index, edit)
+      frame(camera, held.box)
+      const shot = shoot()
+      held.undo()
       return shot
     },
 
+    show(index, edit) {
+      drop()
+      live = stageOne(index, edit)
+      if (index !== shown) {
+        shown = index
+        yaw = 0
+        pitch = 0
+        dolly = 1
+      }
+      look()
+    },
+
+    turn(dx, dy) {
+      yaw -= dx * TURN_PER_PX
+      pitch -= dy * TURN_PER_PX
+      look()
+    },
+
+    zoom(delta) {
+      dolly = MathUtils.clamp(dolly * Math.exp(delta * ZOOM_PER_NOTCH), ...DOLLY_RANGE)
+      look()
+    },
+
+    recentre() {
+      yaw = 0
+      pitch = 0
+      dolly = 1
+      look()
+    },
+
     inContext(index) {
+      drop()
       ghosted(true)
       for (const node of nodes) node.visible = true
       lit ??= new MeshStandardMaterial({
@@ -229,6 +339,7 @@ export async function openStudio(url: string): Promise<PartStudio | null> {
     },
 
     close() {
+      drop()
       ghosted(false)
       stage.remove(gltf.scene)
       release(gltf.scene)
