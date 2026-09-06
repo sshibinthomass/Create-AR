@@ -1,4 +1,7 @@
+import { Fragment } from 'react'
 import { MATERIALS, isEdited, type MaterialType, type PartEdit, type Pose } from '../api'
+import { atRest, REST } from '../animation'
+import { poseFormat } from './TransformReadout'
 
 const AXES = ['X', 'Y', 'Z'] as const
 
@@ -17,7 +20,12 @@ interface Props {
   /** The model's largest dimension, which sets how far a part can be nudged. */
   extent: number
   onChange: (next: PartEdit) => void
-  onReset: () => void
+  /**
+   * Undo part of the edit, or all of it: a null key is the whole edit, which
+   * is what the button in the head asks for; a key with a null axis is one
+   * channel; a key with an axis is a single number.
+   */
+  onReset: (key: keyof Pose | null, axis: number | null) => void
 }
 
 /**
@@ -27,7 +35,9 @@ interface Props {
  * nudging a part until it looks right in the viewer beside you, not entering a
  * figure you already know.
  */
-function Slider({ id, label, value, min, max, step, format, onChange, disabled }: {
+function Slider({
+  id, label, value, min, max, step, format, onChange, disabled, onReset, resetTitle,
+}: {
   id: string
   label: string
   value: number
@@ -37,6 +47,9 @@ function Slider({ id, label, value, min, max, step, format, onChange, disabled }
   format: (v: number) => string
   onChange: (v: number) => void
   disabled?: boolean
+  /** Put this one value back where it started, where there is anything to. */
+  onReset?: () => void
+  resetTitle?: string
 }) {
   return (
     <div className={`edit-row${disabled ? ' off' : ''}`}>
@@ -47,62 +60,98 @@ function Slider({ id, label, value, min, max, step, format, onChange, disabled }
         onChange={(e) => onChange(Number(e.target.value))}
       />
       <span className="edit-v">{format(value)}</span>
+      {onReset && (
+        <button className="edit-undo" title={resetTitle} aria-label={resetTitle} onClick={onReset}>
+          ↺
+        </button>
+      )}
     </div>
   )
 }
+
+/**
+ * One channel's own slider bounds. Nudging is bounded by the model's own size:
+ * a slider that ran to a fixed number of units would be uselessly coarse on a
+ * CAD bracket and uselessly fine on a building.
+ */
+const CHANNELS: {
+  key: keyof Pose
+  id: string
+  label: string
+  range: (reach: number, spin: number) => { min: number; max: number; step: number }
+}[] = [
+  {
+    key: 'move', id: 'move', label: 'Move',
+    range: (reach) => ({ min: -reach, max: reach, step: reach / 200 }),
+  },
+  {
+    key: 'rotate', id: 'rot', label: 'Rotate',
+    range: (_reach, spin) => ({ min: -spin, max: spin, step: 1 }),
+  },
+  {
+    key: 'scale', id: 'scale', label: 'Scale',
+    range: () => ({ min: 0.05, max: 4, step: 0.01 }),
+  },
+]
 
 /**
  * The move, rotate and scale sliders, for a pose held still or a pose at a
  * moment: the edit panel and the animation panel both put a part where it
  * should be with these, and differ only in what they do with the answer.
  *
- * Nudging is bounded by the model's own size: a slider that ran to a fixed
- * number of units would be uselessly coarse on a CAD bracket and uselessly
- * fine on a building. `turns` widens the rotate sliders, for keyframes -- a
- * spin needs to be able to say 360°, which an edit never does.
+ * Every axis carries its own undo, and every channel one that puts all three
+ * back at once -- so a rotation that went too far can be dropped without
+ * losing the move that was got right first. They appear only where there is
+ * something to undo, which doubles as a marker of what has been touched.
+ *
+ * `turns` widens the rotate sliders, for keyframes -- a spin needs to be able
+ * to say 360 degrees, which an edit never does.
  */
-export function TransformSliders({ scope, value, extent, turns = 0.5, onAxis }: {
+export function TransformSliders({ scope, value, extent, turns = 0.5, onAxis, onReset }: {
   scope: string
   value: Pose
   extent: number
   turns?: number
   onAxis: (key: keyof Pose, axis: number, v: number) => void
+  /** Put one axis -- or, with a null axis, a whole channel -- back to rest. */
+  onReset: (key: keyof Pose, axis: number | null) => void
 }) {
-  const reach = extent
-  const decimals = reach < 1 ? 3 : reach < 100 ? 2 : 0
+  const format = poseFormat(extent)
   const spin = 360 * turns
 
   return (
     <>
-      <div className="edit-group">Move</div>
-      {AXES.map((axis, i) => (
-        <Slider
-          key={`m${axis}`} id={`${scope}-move-${axis}`} label={axis} value={value.move[i]}
-          min={-reach} max={reach} step={reach / 200}
-          format={(v) => v.toFixed(decimals)}
-          onChange={(v) => onAxis('move', i, v)}
-        />
-      ))}
-
-      <div className="edit-group">Rotate</div>
-      {AXES.map((axis, i) => (
-        <Slider
-          key={`r${axis}`} id={`${scope}-rot-${axis}`} label={axis} value={value.rotate[i]}
-          min={-spin} max={spin} step={1}
-          format={(v) => `${Math.round(v)}°`}
-          onChange={(v) => onAxis('rotate', i, v)}
-        />
-      ))}
-
-      <div className="edit-group">Scale</div>
-      {AXES.map((axis, i) => (
-        <Slider
-          key={`s${axis}`} id={`${scope}-scale-${axis}`} label={axis} value={value.scale[i]}
-          min={0.05} max={4} step={0.01}
-          format={(v) => `${v.toFixed(2)}×`}
-          onChange={(v) => onAxis('scale', i, v)}
-        />
-      ))}
+      {CHANNELS.map(({ key, id, label, range }) => {
+        const bounds = range(extent, spin)
+        const off = [0, 1, 2].map((i) => !atRest(value, key, i))
+        return (
+          <Fragment key={key}>
+            <div className="edit-group">
+              {label}
+              {off.some(Boolean) && (
+                <button
+                  className="edit-undo"
+                  title={`Put ${label.toLowerCase()} back on all three axes`}
+                  aria-label={`Reset ${label}`}
+                  onClick={() => onReset(key, null)}
+                >
+                  ↺
+                </button>
+              )}
+            </div>
+            {AXES.map((axis, i) => (
+              <Slider
+                key={axis} id={`${scope}-${id}-${axis}`} label={axis} value={value[key][i]}
+                min={bounds.min} max={bounds.max} step={bounds.step}
+                format={format[key]}
+                onChange={(v) => onAxis(key, i, v)}
+                onReset={off[i] ? () => onReset(key, i) : undefined}
+                resetTitle={`Put ${label.toLowerCase()} ${axis} back to ${format[key](REST[key][i])}`}
+              />
+            ))}
+          </Fragment>
+        )
+      })}
     </>
   )
 }
@@ -143,7 +192,7 @@ export default function PartEditor({
             : `Editing ${names.length} parts`}
         </span>
         {isEdited(value) && (
-          <button className="edit-reset" onClick={onReset}>Reset</button>
+          <button className="edit-reset" onClick={() => onReset(null, null)}>Reset</button>
         )}
       </div>
 
@@ -155,7 +204,9 @@ export default function PartEditor({
         </div>
       )}
 
-      <TransformSliders scope={scope} value={value} extent={extent} onAxis={setAxis} />
+      <TransformSliders
+        scope={scope} value={value} extent={extent} onAxis={setAxis} onReset={onReset}
+      />
 
       <div className="edit-group">Material</div>
       <div className="edit-row">

@@ -1,10 +1,12 @@
-import { useEffect, useRef, useState } from 'react'
+import { type ReactNode, useEffect, useRef, useState } from 'react'
 import {
-  isEdited, NO_EDIT, type NamerSettings, type PartDetails, type PartEdit,
+  isEdited, NO_EDIT, type NamerSettings, type PartDetails, type PartEdit, type Pose,
 } from '../api'
+import { restAxes } from '../animation'
 import type { PartStudio } from '../partShots'
 import { nameOnePart } from '../useNamer'
 import PartEditor from './PartEditor'
+import TransformReadout from './TransformReadout'
 
 /**
  * One component, on its own and full size.
@@ -88,6 +90,16 @@ export default function PartDialog({
 
   const dirty = draftName !== name || !sameDetails(fromRows(rows), details)
 
+  /**
+   * Undo one number, one channel, or the whole edit. Only the last is the
+   * parent's business -- it is the one that takes the part off the edited
+   * list; the rest are a change to the edit like any other.
+   */
+  const resetEdit = (key: keyof Pose | null, axis: number | null) => {
+    if (key === null || !edit) onResetEdit()
+    else onEdit({ ...edit, [key]: restAxes(edit, key, axis) })
+  }
+
   // Escape closes, the way every other dialog does -- but not out from under
   // unsaved work.
   useEffect(() => {
@@ -132,7 +144,17 @@ export default function PartDialog({
         </div>
 
         <div className="pd-body">
-          <Stage url={url} index={index} name={name} edit={edit} />
+          <Stage
+            url={url} index={index} name={name} edit={edit}
+            readout={(
+              <TransformReadout
+                title="Transform"
+                poses={[edit ?? NO_EDIT]}
+                extent={extent}
+                onReset={resetEdit}
+              />
+            )}
+          />
 
           <div className="pd-side">
             <div className="pd-block">
@@ -231,7 +253,7 @@ export default function PartDialog({
               value={edit ?? NO_EDIT}
               extent={extent}
               onChange={onEdit}
-              onReset={onResetEdit}
+              onReset={resetEdit}
             />
 
             <div className="pd-danger">
@@ -271,11 +293,13 @@ export default function PartDialog({
  * and the camera is the only thing that moves. Turning the *part* is what the
  * rotate sliders below do, and that is an edit; this is just where you stand.
  */
-function Stage({ url, index, name, edit }: {
+function Stage({ url, index, name, edit, readout }: {
   url: string
   index: number
   name: string
   edit: PartEdit | undefined
+  /** Where the part has been moved to, under the render of it. */
+  readout: ReactNode
 }) {
   const host = useRef<HTMLDivElement>(null)
   const studio = useRef<PartStudio | null>(null)
@@ -425,6 +449,7 @@ function Stage({ url, index, name, edit }: {
           </button>
         )}
       </div>
+      {readout}
     </div>
   )
 }

@@ -74,6 +74,23 @@ export function poseAt(track: Track | undefined, time: number): Pose {
 export const isPosed = (p: Pose): boolean =>
   p.move.some((v) => v !== 0) || p.rotate.some((v) => v !== 0) || p.scale.some((v) => v !== 1)
 
+/** Whether one axis of one channel is still where it started. */
+export const atRest = (p: Pose, key: keyof Pose, axis: number): boolean =>
+  p[key][axis] === REST[key][axis]
+
+/**
+ * One channel of a pose with a single axis -- or, with `axis` null, all three
+ * -- put back to rest.
+ *
+ * The panels and the readout both undo a change this way, and both hand the
+ * result back as a whole channel, because that is the shape a pose stores.
+ */
+export const restAxes = (
+  p: Pose, key: keyof Pose, axis: number | null,
+): [number, number, number] =>
+  p[key].map((v, i) => (axis === null || axis === i ? REST[key][i] : v)) as
+    [number, number, number]
+
 export const track = (clip: Clip, target: string): Track | undefined =>
   clip.tracks.find((t) => t.target === target)
 

@@ -520,12 +520,31 @@ input[type='range'] { width: 110px; accent-color: var(--accent); }
 .edit-reset:hover { color: var(--accent); border-color: var(--accent); }
 
 .edit-group {
+  display: flex; align-items: center; gap: 7px;
   font-size: 11px; text-transform: uppercase; letter-spacing: .06em;
   color: var(--dim); margin: 12px 0 5px;
 }
 .edit-group:first-of-type { margin-top: 0; }
 
-.edit-row { display: flex; align-items: center; gap: 10px; padding: 2px 0; }
+/* The undo beside a slider, and the one beside a channel's name. Only drawn
+   where there is something to undo, so its presence is also the marker that
+   says this number has been touched. */
+.edit-undo {
+  flex: none; display: inline-flex; align-items: center; justify-content: center;
+  width: 20px; height: 20px; padding: 0;
+  background: none; border: none; border-radius: 5px;
+  color: var(--dim); font-size: 13px; line-height: 1;
+}
+.edit-undo:hover { color: var(--accent); background: var(--accent-soft); }
+/* Beside a slider the button comes and goes as the value leaves rest and
+   returns to it. Every row keeps a gutter for one whether or not it has one --
+   the button hangs out into that gutter rather than taking room of its own --
+   so no slider in the panel changes length, and none is shorter than the rest
+   merely for having an undo. */
+.edit-row .edit-undo { margin-right: -30px; }
+
+/* The right-hand padding is the undo's gutter -- see .edit-undo above. */
+.edit-row { display: flex; align-items: center; gap: 10px; padding: 2px 30px 2px 0; }
 /* A slider that needs a material to act on: shown, so the option is findable,
    but plainly not in play until one is picked. */
 .edit-row.off { opacity: .4; }
@@ -1026,9 +1045,24 @@ button.field-side:hover { color: var(--err); }
 
 /* ---------- the selected part, on its own ---------- */
 
-.part-shot {
+/* The right-hand stack over the model: the figures, and the part on its own
+   under them. One column rather than two floating panels, so neither has to
+   know how tall the other turned out to be. It scrolls where the stage is too
+   short for both -- which costs the thumbnail rather than the figures, since
+   the figures are drawn first. */
+.viewer-side {
   position: absolute; z-index: 4; top: 58px; right: 12px;
-  width: 168px;
+  width: 230px; max-height: calc(100% - 106px);
+  display: flex; flex-direction: column; align-items: flex-end; gap: 10px;
+  overflow-y: auto;
+}
+.viewer-side > .xform { align-self: stretch; }
+
+/* Held to its own width rather than growing to the column: the thumbnail is
+   square, so a width that fits three columns of figures is a height the stage
+   has not got to spare once the figures are above it. */
+.part-shot {
+  flex: none; width: 160px;
   border-radius: 10px; border: 1px solid var(--line);
   background: rgba(18, 21, 29, .93);
   backdrop-filter: blur(6px);
@@ -1057,6 +1091,72 @@ button.field-side:hover { color: var(--err); }
   padding: 6px 9px; font-size: 10px; letter-spacing: .05em;
   text-transform: uppercase; color: var(--dim);
   border-top: 1px solid var(--line-soft);
+}
+
+/* ---------- where the marked parts sit ---------- */
+
+.xform {
+  flex: none;
+  border-radius: 10px; border: 1px solid var(--line);
+  background: rgba(18, 21, 29, .93);
+  backdrop-filter: blur(6px);
+  box-shadow: 0 10px 30px rgba(0, 0, 0, .45);
+}
+.xform-head {
+  display: flex; align-items: baseline; gap: 8px;
+  padding: 6px 9px; border-bottom: 1px solid var(--line-soft);
+  font-size: 10px; letter-spacing: .05em; text-transform: uppercase;
+}
+.xform-who {
+  flex: 1; min-width: 0; color: var(--muted);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.xform-at { flex: none; color: var(--dim); font-variant-numeric: tabular-nums; }
+
+.xform-grid {
+  display: grid; grid-template-columns: auto repeat(3, minmax(0, 1fr));
+  align-items: center; gap: 0 2px; padding: 4px 8px 6px;
+}
+.xform-axis {
+  text-align: center; font-size: 9px; letter-spacing: .1em;
+  color: var(--dim); padding-bottom: 1px;
+}
+.xform-key {
+  display: flex; align-items: center; gap: 2px;
+  padding-right: 5px; font-size: 11px; color: var(--muted); white-space: nowrap;
+}
+/* A figure is its own undo: live where the value has left rest, inert where it
+   has not -- which is what says at a glance which axes have been touched. */
+.xform-v {
+  padding: 1px; border: 1px solid transparent; border-radius: 5px;
+  background: none; color: var(--dim);
+  font: 11px/1.35 ui-monospace, Menlo, Consolas, monospace;
+  font-variant-numeric: tabular-nums; text-align: center;
+  overflow: hidden; text-overflow: ellipsis;
+}
+.xform-v.on { color: var(--text); background: var(--accent-soft); border-color: rgba(91, 140, 255, .3); }
+.xform-v.on:hover { color: var(--accent); border-color: var(--accent); }
+.xform-v:disabled { cursor: default; }
+/* Small enough to sit in a row of figures without becoming the loudest thing
+   in it; it shares the sliders' undo styling otherwise. */
+.xform-undo {
+  flex: none; width: 16px; height: 16px; padding: 0;
+  display: inline-flex; align-items: center; justify-content: center;
+  background: none; border: none; border-radius: 4px;
+  color: var(--dim); font-size: 12px; line-height: 1;
+}
+.xform-undo:hover { color: var(--accent); background: var(--accent-soft); }
+
+/* In the part dialog the readout is not floating over anything -- it is a
+   footer under the render, and takes the panel's own edge. */
+.pd-stage .xform {
+  border: none; border-top: 1px solid var(--line-soft);
+  border-radius: 0; background: none; box-shadow: none; backdrop-filter: none;
+}
+.pd-stage .xform-head { border-bottom: none; padding: 8px 12px 0; }
+.pd-stage .xform-grid {
+  grid-template-columns: auto repeat(3, minmax(0, 96px));
+  justify-content: start; gap: 1px 10px; padding: 8px 12px 10px;
 }
 
 /* ---------- one component, full size ---------- */
