@@ -1,11 +1,14 @@
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   DEFAULT_OPTIONS, downloadUrl, formatCount, isEdited, NO_EDIT, previewUrl,
-  type Capabilities, type Health, type PartEdit,
+  type Capabilities, type Health, type NamerSettings, type PartDetails,
+  type PartEdit, type PartsDoc,
 } from '../api'
 import Dropzone from '../components/Dropzone'
 import PartEditor from '../components/PartEditor'
+import PartPreview from '../components/PartPreview'
 import { useConversion } from '../useConversion'
+import { useNamer } from '../useNamer'
 
 const ModelViewer = lazy(() => import('../components/ModelViewer'))
 
@@ -20,14 +23,24 @@ const NAMELESS = new Set(['.stl', '.ply'])
  * the names and edits applied. The second pass re-uses the upload the server
  * already has, so only the changes travel.
  */
-export default function AnalysisView({ health, caps, active }: {
+export default function AnalysisView({
+  health, caps, active, settings, onOpenSettings,
+}: {
   health: Health | null
   caps: Capabilities | null
   active: boolean
+  /** Owned by the app, edited on the Settings page. Null until they load. */
+  settings: NamerSettings | null
+  onOpenSettings: () => void
 }) {
   const [file, setFile] = useState<File | null>(null)
   const [parts, setParts] = useState<string[]>([])
   const [renames, setRenames] = useState<Record<string, string>>({})
+  // What each part is, keyed by its name in the file -- the same key `renames`
+  // uses, so both survive a save and come back together in a bundle.
+  const [details, setDetails] = useState<Record<string, PartDetails>>({})
+  // 'model' saves the converted file alone; 'bundle' zips it with parts.json.
+  const [wrap, setWrap] = useState<'model' | 'bundle'>('model')
   const [edits, setEdits] = useState<Record<string, PartEdit>>({})
   const [reach, setReach] = useState(1)
   const [selected, setSelected] = useState<string[]>([])
@@ -36,6 +49,7 @@ export default function AnalysisView({ health, caps, active }: {
 
   const analysis = useConversion()
   const exported = useConversion()
+  const namer = useNamer()
   const clearExport = exported.setJob
 
   // A different model means a different set of parts; nothing carries over.
@@ -43,6 +57,7 @@ export default function AnalysisView({ health, caps, active }: {
     setParts(names)
     setReach(span)
     setRenames({})
+    setDetails({})
     setEdits({})
     setSelected([])
     clearExport(null)
@@ -118,6 +133,37 @@ export default function AnalysisView({ health, caps, active }: {
     }
   }, [selected])
 
+  /**
+   * Put a bundle's own document back on the parts it describes.
+   *
+   * The model inside a bundle was written with the names already applied, so a
+   * part's name in the file usually *is* the document's `name`; `originalName`
+   * catches a bundle whose model was exported to a format that cannot carry
+   * names at all, and the index is the last resort. Runs once per set of parts,
+   * and only fills what the user has not already changed.
+   */
+  const doc = analysis.job?.partDoc ?? null
+  const applied = useRef<PartsDoc | null>(null)
+  useEffect(() => {
+    if (!doc || !parts.length || applied.current === doc) return
+    applied.current = doc
+    const byName = new Map<string, PartsDoc['parts'][number]>()
+    for (const entry of doc.parts) {
+      if (entry.name) byName.set(entry.name, entry)
+      if (entry.originalName) byName.set(entry.originalName, entry)
+    }
+    const names: Record<string, string> = {}
+    const notes: Record<string, PartDetails> = {}
+    parts.forEach((part, at) => {
+      const entry = byName.get(part) ?? doc.parts.find((e) => e.index === at)
+      if (!entry) return
+      if (entry.name && entry.name !== part) names[part] = entry.name
+      if (Object.keys(entry.details).length) notes[part] = entry.details
+    })
+    setRenames((was) => ({ ...names, ...was }))
+    setDetails((was) => ({ ...notes, ...was }))
+  }, [doc, parts])
+
   const outputs = useMemo(
     () => (caps?.formats ?? []).filter((f) => f.can_export),
     [caps],
@@ -127,6 +173,17 @@ export default function AnalysisView({ health, caps, active }: {
   const preview = analysis.job?.status === 'done' && analysis.job.hasPreview
     ? previewUrl(analysis.job.id)
     : null
+  // One part at a time in the card: with several marked the panel below the
+  // list is already showing what they have in common, and stacking descriptions
+  // would bury the model.
+  const shown = useMemo(() => {
+    if (selected.length !== 1) return null
+    const part = selected[0]
+    const at = parts.indexOf(part)
+    if (at < 0) return null
+    return { at, name: renames[part] ?? part, details: details[part] ?? {} }
+  }, [selected, parts, renames, details])
+
   const renamed = Object.keys(renames).length
   const adjusted = Object.values(edits).filter(isEdited).length
 
@@ -135,11 +192,43 @@ export default function AnalysisView({ health, caps, active }: {
     if (!file) return
     setParts([])
     setRenames({})
+    setDetails({})
     setEdits({})
     setSelected([])
     exported.setJob(null)
     analysis.start(file, '.glb', DEFAULT_OPTIONS)
   }
+
+  /**
+   * Hand every part to the model and write back what it says they are.
+   *
+   * The answers arrive chunk by chunk and are folded straight into `renames`,
+   * so they show up in the list as they land and every row keeps its own undo.
+   * A name that matches the file's own is not a rename, the same rule the
+   * name field itself follows.
+   */
+  function autoName() {
+    if (!preview || !settings) return
+    namer.run(preview, parts, settings, (found, told) => {
+      setRenames((was) => {
+        const copy = { ...was }
+        for (const [original, name] of Object.entries(found)) {
+          if (name === original) delete copy[original]
+          else copy[original] = name
+        }
+        return copy
+      })
+      if (Object.keys(told).length) setDetails((was) => ({ ...was, ...told }))
+    })
+  }
+
+  /** Every part, as the document records it: its old name, its new one, and what it is. */
+  const described = useMemo(() => parts.map((name, index) => ({
+    index,
+    originalName: name,
+    name: renames[name] ?? name,
+    details: details[name] ?? {},
+  })), [parts, renames, details])
 
   function save() {
     if (!analysis.job) return
@@ -148,6 +237,8 @@ export default function AnalysisView({ health, caps, active }: {
       archive_entry: analysis.job.archiveEntry ?? '',
       renames,
       edits,
+      bundle: wrap === 'bundle',
+      part_details: wrap === 'bundle' ? described : undefined,
     })
   }
 
@@ -226,6 +317,53 @@ export default function AnalysisView({ health, caps, active }: {
                 </button>
               )}
             </div>
+            <div className="name-bar">
+              <button
+                className="go name-go"
+                disabled={!preview || !settings?.configured || namer.busy || analysis.busy}
+                onClick={autoName}
+              >
+                {namer.busy
+                  ? `${namer.step}… ${namer.done}/${namer.total}`
+                  : 'Name parts with AI'}
+              </button>
+              {namer.busy ? (
+                <button className="head-reset" onClick={namer.stop}>Stop</button>
+              ) : (
+                <button
+                  className="head-reset"
+                  title="Provider, batching and the instructions"
+                  onClick={onOpenSettings}
+                >
+                  Settings
+                </button>
+              )}
+            </div>
+
+            {namer.busy && (
+              <div className="name-prog">
+                <div className={`bar${namer.total ? '' : ' indet'}`}>
+                  <i style={{ width: `${namer.total ? (namer.done / namer.total) * 100 : 0}%` }} />
+                </div>
+              </div>
+            )}
+
+            {settings && !settings.configured && !namer.busy && (
+              <div className="name-prog">
+                <div className="note" style={{ marginTop: 0 }}>
+                  Naming needs a provider and an API key. Pick one in{' '}
+                  <button className="link" onClick={onOpenSettings}>Settings</button> —
+                  they are kept on the server, not in the browser.
+                </div>
+              </div>
+            )}
+
+            {namer.error && (
+              <div className="name-prog">
+                <div className="error-box">{namer.error}</div>
+              </div>
+            )}
+
             <div className="parts" ref={list}>
               {parts.map((name, i) => (
                 <div
@@ -282,6 +420,24 @@ export default function AnalysisView({ health, caps, active }: {
 
             <div className="card-body">
               <div className="opt-row">
+                <label>Export</label>
+                <div className="ctl wrap-pick">
+                  <button
+                    className={`wrap-opt${wrap === 'model' ? ' sel' : ''}`}
+                    onClick={() => setWrap('model')}
+                  >
+                    Model only
+                  </button>
+                  <button
+                    className={`wrap-opt${wrap === 'bundle' ? ' sel' : ''}`}
+                    onClick={() => setWrap('bundle')}
+                  >
+                    Model + details
+                  </button>
+                </div>
+              </div>
+
+              <div className="opt-row">
                 <label htmlFor="an-target">Save as</label>
                 <div className="ctl">
                   <select id="an-target" value={target} onChange={(e) => setTarget(e.target.value)}>
@@ -293,6 +449,19 @@ export default function AnalysisView({ health, caps, active }: {
                   </select>
                 </div>
               </div>
+
+              {wrap === 'bundle' && (
+                <div className="note">
+                  A ZIP holding the {target.slice(1).toUpperCase()} and a{' '}
+                  <code>parts.json</code> describing every part. Drop that ZIP
+                  back in and the app recognises its own document, putting the
+                  names and descriptions back on the parts they belong to.
+                  {described.every((d) => !Object.keys(d.details).length) && (
+                    <> Nothing has been described yet — the document will carry
+                    the names alone until you run the namer with descriptions on.</>
+                  )}
+                </div>
+              )}
 
               {NAMELESS.has(target) && (
                 <div className="note">
@@ -321,7 +490,9 @@ export default function AnalysisView({ health, caps, active }: {
               >
                 {exported.busy
                   ? `Saving… ${exported.job?.progress ?? 0}%`
-                  : `Save as ${target.slice(1).toUpperCase()}`}
+                  : wrap === 'bundle'
+                    ? `Save ${target.slice(1).toUpperCase()} + details as ZIP`
+                    : `Save as ${target.slice(1).toUpperCase()}`}
               </button>
 
               {exported.job?.status === 'done' && (
@@ -335,7 +506,51 @@ export default function AnalysisView({ health, caps, active }: {
       </div>
 
       <div className="col">
-        <section className="card">
+        <section className="card viewer-card">
+          {/* The selected part on its own, against the assembly on the right:
+              a box around a trim piece says where it is, not what it is. */}
+          {shown && preview && (
+            <PartPreview
+              url={preview}
+              index={shown.at}
+              name={shown.name}
+              edit={edits[selected[0]]}
+            />
+          )}
+
+          {/* What the selected part is, over the model rather than beside it:
+              the name is already on the part, and this is the rest of it. */}
+          {shown && (
+            <aside className="part-card">
+              <div className="part-card-head">
+                <h3>{shown.name}</h3>
+                <button
+                  className="part-card-x"
+                  title="Hide these details"
+                  onClick={() => setSelected([])}
+                >
+                  ×
+                </button>
+              </div>
+              {Object.keys(shown.details).length ? (
+                <dl className="part-facts">
+                  {Object.entries(shown.details).map(([label, text]) => (
+                    <div key={label}>
+                      <dt>{label}</dt>
+                      <dd>{text}</dd>
+                    </div>
+                  ))}
+                </dl>
+              ) : (
+                <p className="part-card-empty">
+                  Nothing is recorded about this part yet. Run <b>Name parts
+                  with AI</b> with descriptions turned on, or open a bundle that
+                  already has them.
+                </p>
+              )}
+            </aside>
+          )}
+
           <Suspense fallback={<div className="viewer"><div className="viewer-empty">Loading viewer…</div></div>}>
             <ModelViewer
               key={preview ?? 'empty'}

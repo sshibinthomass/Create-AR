@@ -10,7 +10,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
 
-from . import archives, config, formats
+from . import archives, config, formats, parts_doc
 from .archives import ArchiveError
 
 ProgressFn = Callable[[int, str], None]
@@ -31,6 +31,8 @@ class Result:
     warnings: list[str] = field(default_factory=list)
     archive_entries: list[str] = field(default_factory=list)  # models found inside
     archive_entry: str | None = None                          # the one converted
+    # The parts document found in an uploaded bundle, if it was one of ours.
+    part_doc: dict | None = None
 
 
 def tessellate_cad(src: Path, dst: Path, options: dict) -> None:
@@ -132,10 +134,16 @@ def run_blender(cfg_path: Path, on_progress: ProgressFn, on_log: LogFn) -> dict:
     return collected
 
 
-def _package_outputs(out_dir: Path, primary: Path, stem: str, target_ext: str) -> tuple[Path, str]:
-    """Zip the result when the exporter produced sidecars (.mtl, .bin, textures)."""
+def _package_outputs(out_dir: Path, primary: Path, stem: str, target_ext: str,
+                     force: bool = False) -> tuple[Path, str]:
+    """Zip the result when the exporter produced sidecars (.mtl, .bin, textures).
+
+    ``force`` zips regardless, which is what a parts bundle needs: the document
+    has to travel with the model even when the model is a single self-contained
+    file.
+    """
     produced = [p for p in out_dir.rglob("*") if p.is_file()]
-    if target_ext not in formats.MULTIFILE_EXTS and len(produced) <= 1:
+    if not force and target_ext not in formats.MULTIFILE_EXTS and len(produced) <= 1:
         return primary, primary.name
 
     archive = out_dir.parent / f"{stem}{target_ext.replace('.', '_')}.zip"
@@ -171,6 +179,7 @@ def convert(
     texture_root: Path | None = None
     entries: list[str] = []
     entry: str | None = None
+    part_doc: dict | None = None
     if src_ext in formats.ARCHIVE_EXTS:
         on_progress(4, "Unpacking archive")
         try:
@@ -183,6 +192,12 @@ def convert(
         root = work / "archive"
         entries = [p.relative_to(root).as_posix() for p in found.candidates]
         entry = found.model.relative_to(root).as_posix()
+        # An archive this app wrote carries what its parts are; pick it up so the
+        # names and descriptions can go back on them.
+        part_doc = parts_doc.find(root)
+        if part_doc:
+            on_log(f"Found {parts_doc.FILENAME}: "
+                   f"{len(part_doc['parts'])} described parts")
         source = found.model
         # Name the download after the model inside, not "archive.glb".
         stem_override = source.stem
@@ -223,7 +238,17 @@ def convert(
     if target_ext == ".glb" and not preview.exists():
         shutil.copyfile(primary, preview)
 
-    download_path, download_name = _package_outputs(out_dir, primary, stem, target_ext)
+    details = [parts_doc.PartDetail(**d) for d in options.get("part_details") or []]
+    bundle = bool(options.get("bundle")) and bool(details)
+    if bundle:
+        written = parts_doc.write(
+            parts_doc.build(details, model_file=primary.name, source_name=source.name),
+            out_dir,
+        )
+        on_log(f"Wrote {written.name}: {len(details)} parts")
+
+    download_path, download_name = _package_outputs(
+        out_dir, primary, stem, target_ext, force=bundle)
     stats = collected["stats"]
     return Result(
         output_path=download_path,
@@ -234,4 +259,5 @@ def convert(
         warnings=collected["warnings"],
         archive_entries=entries,
         archive_entry=entry,
+        part_doc=part_doc,
     )

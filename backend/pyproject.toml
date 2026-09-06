@@ -16,6 +16,10 @@ dependencies = [
     "numpy>=1.24",
     "cascadio>=0.1.1",
     "py7zr>=0.20",
+    # Naming parts from their renders. Which one is used is a setting; both
+    # are installed so switching provider needs no reinstall.
+    "openai>=1.40",
+    "anthropic>=0.40",
 ]
 
 [project.optional-dependencies]

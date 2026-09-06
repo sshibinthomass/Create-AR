@@ -15,7 +15,8 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, ValidationError, field_validator
 
-from . import config, formats
+from . import config, formats, naming, parts_doc
+from . import settings as settings_store
 from .jobs import new_job_dir, store
 
 config.ensure_dirs()
@@ -126,6 +127,17 @@ class Options(BaseModel):
     renames: dict[str, str] = Field(default_factory=dict)
     # Object name -> the tweaks to apply to it, likewise before export.
     edits: dict[str, PartEdit] = Field(default_factory=dict)
+    # Write parts.json beside the model and zip the two together. What goes in
+    # it comes from the browser, which is where the parts were named.
+    bundle: bool = False
+    part_details: list[parts_doc.PartDetail] = Field(default_factory=list)
+
+    @field_validator("part_details")
+    @classmethod
+    def _cap_part_details(cls, value: list) -> list:
+        if len(value) > parts_doc.MAX_PARTS:
+            raise ValueError(f"at most {parts_doc.MAX_PARTS} described parts per job")
+        return value
 
     @field_validator("renames")
     @classmethod
@@ -188,6 +200,47 @@ def health() -> dict:
 @app.get("/api/formats")
 def get_formats() -> dict:
     return formats.describe()
+
+
+@app.get("/api/settings")
+def read_settings() -> dict:
+    return settings_store.load().public()
+
+
+@app.put("/api/settings")
+def write_settings(incoming: settings_store.Settings, clear_key: str = "") -> dict:
+    """Save the settings page.
+
+    The browser is never sent an API key, so it cannot send one back: an empty
+    key field means "leave the stored one alone", for each provider separately.
+    Forgetting a key is therefore a deliberate act -- `?clear_key=anthropic` --
+    rather than something an ordinary save can do by accident.
+    """
+    if clear_key and clear_key not in settings_store.KEY_FIELDS:
+        raise HTTPException(400, f"'{clear_key}' is not a provider.")
+    stored = settings_store.load()
+    for provider, field in settings_store.KEY_FIELDS.items():
+        if not getattr(incoming, field) and provider != clear_key:
+            setattr(incoming, field, getattr(stored, field))
+    settings_store.save(incoming)
+    return incoming.public()
+
+
+@app.post("/api/name-parts")
+def name_parts(request: naming.NameRequest) -> dict:
+    """Name one chunk of rendered parts. See naming.py for why it is a chunk."""
+    settings = settings_store.load()
+    if not settings.configured():
+        raise HTTPException(
+            400,
+            f"The {settings.provider} provider is not set up yet -- open "
+            "Settings and fill in what it needs.",
+        )
+    try:
+        named = naming.name_parts(request, settings)
+    except naming.NamingError as exc:
+        raise HTTPException(502, str(exc)) from exc
+    return {"names": [{"index": i, **found} for i, found in named.items()]}
 
 
 @app.post("/api/convert")

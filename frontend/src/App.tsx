@@ -1,9 +1,15 @@
 import { useEffect, useState } from 'react'
-import { getCapabilities, getHealth, type Capabilities, type Health } from './api'
+import {
+  getCapabilities, getHealth, getSettings,
+  type Capabilities, type Health, type NamerSettings,
+} from './api'
 import ConvertView from './views/ConvertView'
 import AnalysisView from './views/AnalysisView'
+import SettingsView from './views/SettingsView'
 
-type Tab = 'convert' | 'analysis'
+// Settings is a view like the others, but it is not a step in the work, so
+// it is reached from the gear in the corner rather than from the tab bar.
+type Tab = 'convert' | 'analysis' | 'settings'
 
 const TABS: { id: Tab; label: string }[] = [
   { id: 'convert', label: 'Convert' },
@@ -13,6 +19,7 @@ const TABS: { id: Tab; label: string }[] = [
 export default function App() {
   const [health, setHealth] = useState<Health | null>(null)
   const [caps, setCaps] = useState<Capabilities | null>(null)
+  const [settings, setSettings] = useState<NamerSettings | null>(null)
   const [bootError, setBootError] = useState<string | null>(null)
   const [tab, setTab] = useState<Tab>('convert')
 
@@ -20,6 +27,9 @@ export default function App() {
     Promise.all([getHealth(), getCapabilities()])
       .then(([h, c]) => { setHealth(h); setCaps(c) })
       .catch((e: Error) => setBootError(e.message))
+    // Settings are read separately: the app is perfectly usable without
+    // them, so they must not be able to fail the boot.
+    getSettings().then(setSettings).catch(() => setSettings(null))
   }, [])
 
   return (
@@ -55,6 +65,18 @@ export default function App() {
         {health?.cadSupport && (
           <span className="badge ok"><i className="dot" />STEP / IGES ready</span>
         )}
+        <button
+          className={`gear${tab === 'settings' ? ' sel' : ''}`}
+          title="Settings"
+          aria-label="Settings"
+          onClick={() => setTab(tab === 'settings' ? 'convert' : 'settings')}
+        >
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+               strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round">
+            <circle cx="12" cy="12" r="3.2" />
+            <path d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.9-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1A1.7 1.7 0 0 0 8.9 19a1.7 1.7 0 0 0-1.9.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.9 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1A1.7 1.7 0 0 0 5 8.9a1.7 1.7 0 0 0-.3-1.9l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.9.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.9-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.9V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z" />
+          </svg>
+        </button>
       </header>
 
       {bootError && (
@@ -69,7 +91,16 @@ export default function App() {
         <ConvertView health={health} caps={caps} active={tab === 'convert'} />
       </div>
       <div className="view" hidden={tab !== 'analysis'}>
-        <AnalysisView health={health} caps={caps} active={tab === 'analysis'} />
+        <AnalysisView
+          health={health}
+          caps={caps}
+          active={tab === 'analysis'}
+          settings={settings}
+          onOpenSettings={() => setTab('settings')}
+        />
+      </div>
+      <div className="view" hidden={tab !== 'settings'}>
+        <SettingsView settings={settings} onSaved={setSettings} />
       </div>
     </div>
   )

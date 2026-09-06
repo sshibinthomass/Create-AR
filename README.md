@@ -128,6 +128,174 @@ Separation is applied in the browser, to the preview GLB, and is only a way of
 looking at the model — it never moves anything in the file you download. Edits
 made in the panel below the list, on the other hand, do.
 
+## Naming parts with a vision model
+
+`Mesh_014`, `Cube.003`, `polySurface27` — most assemblies arrive with names that
+say nothing. **Name parts with AI**, above the parts list, hands every part to an
+Azure OpenAI vision deployment and writes back what it says they are. The names
+land in the list as they arrive, each row keeps its own undo, and **Reset names**
+still puts the lot back; a named part is a rename like any other, so nothing new
+happens at save time.
+
+The pictures are taken in the browser. The model is already loaded in WebGL, so
+each part is framed and shot offscreen in a few milliseconds, where a second
+Blender pass would cost a process launch per part. Each part gets up to two:
+
+- **On its own**, framed tight against a plain backdrop, wearing its own
+  materials.
+- **In the assembly**, the same fixed view every time, with that one part lit
+  orange and everything else ghosted. This is the one that earns its keep — a
+  short cylinder is a spacer or a wheel hub depending entirely on what it sits
+  in, and the shape alone will not say. It roughly doubles the image cost, and
+  can be turned off.
+
+Only the renders and the file's own name are sent; the model itself never leaves
+the machine it was uploaded to.
+
+### One part per request, or several
+
+Both, switched in **Settings**.
+
+- **Several parts per request** (the default, 8 at a time) is cheaper and much
+  faster, and it lets the model tell siblings apart: shown four brackets
+  together it will say *Left Front Bracket* rather than *Bracket* four times.
+- **One part per request** gives each part the model's whole attention. Worth it
+  for a small model of unusual parts; on a 200-part assembly it is 200 round
+  trips.
+
+Either way the parts are cut into chunks and a small pool of requests — three by
+default — works through them in parallel, and each request is told which names
+have already been handed out so it does not repeat them. A chunk that fails ends
+the run and reports why, keeping whatever was already named.
+
+### Every name comes out unique
+
+Telling the model what has already been used is a hint, not a guarantee, and it
+should not be one: four identical brackets *are* four brackets, and two chunks in
+flight at once cannot see each other's answers. So any name that ends up on more
+than one part is numbered — `Bracket #1` through `Bracket #4` — while a name only
+one part holds is left exactly as it came. Numbering follows the part order in
+the list, not the order the replies arrived in, and matching ignores case.
+
+The whole set is worked out afresh as each chunk lands, because a duplicate only
+becomes visible when the second part arrives: by then the first is already in the
+list under its plain name, and gets numbered after the fact.
+
+### Providers
+
+Four, chosen on the settings page:
+
+| | What it needs |
+|---|---|
+| **Azure OpenAI** | Endpoint, key, deployment name, API version. The deployment has to be one that accepts images. |
+| **OpenAI** | An OpenAI key and a model — `gpt-4o` by default. |
+| **Anthropic** | An Anthropic key and a model — `claude-opus-5` by default. Every Claude model reads images. |
+| **OpenAI-compatible URL** | A base URL and a model name, for anything else speaking the same API: a local llama.cpp or vLLM server, a gateway, a router. The key is optional, because local servers usually want none. |
+
+Each keeps its own key, so trying Claude for an afternoon does not cost you the
+Azure key you had typed in, and a green dot on the settings page marks every
+provider a key is held for. The three OpenAI-shaped providers are asked for a
+JSON object and given the reply's shape in the prompt; Anthropic is handed a
+JSON schema to enforce, and its refusals are reported rather than parsed as a
+name.
+
+### Settings
+
+The **gear** in the top-right corner opens them — provider and its credentials,
+one-per-request or batched, batch size, how many requests run at once, whether
+to send the second picture, and the instructions the model is given. They are
+saved on the server under `CONVERTER_DATA_DIR` (git-ignored, the same directory
+the jobs live in), so they survive a restart and never reach the repository.
+
+An API key is write-only from the browser: the server never sends one back, only
+which providers it holds a key for, so saving with a key field blank keeps the
+stored key and forgetting one is its own button.
+
+On a fresh install the Azure fields are seeded from `AZURE_OPENAI_ENDPOINT`,
+`AZURE_OPENAI_API_KEY`, `AZURE_OPENAI_DEPLOYMENT` and `AZURE_OPENAI_API_VERSION`,
+so a container can be configured without anyone opening the page; a value typed
+in wins from then on. `OPENAI_API_KEY` and `ANTHROPIC_API_KEY` are deliberately
+**not** read. They name no particular application and are set machine-wide by
+editors, shell profiles and other agents, so adopting one would write a key the
+user never intended for this app into `settings.json` on the first save, and
+show the app as ready to spend against it.
+
+The instructions are yours to rewrite. The reply format is not in them — it is
+added to every request separately, so editing them cannot break the naming.
+
+## What each part is, and the bundle that carries it
+
+A model file has nowhere to say what a part is *for*. glTF, USD and FBX all
+carry names and geometry and stop there. So the descriptions travel beside the
+model, in a `parts.json`, and the two are zipped together.
+
+With **Describe each part** on in Settings, a naming run also asks what each part
+is, what it does, how it is used, its purpose, and whatever else applies — the
+labels are the model's own choice, not a fixed schema, because what is worth
+saying about a bearing is not what is worth saying about a wiring loom. With the
+toggle off a run only renames, and costs a fraction as much.
+
+Clicking a part fills both corners of the viewer: what it is on the left, and the
+part **on its own** on the right. A selection box around a trim piece on a whole
+car says where the part is and almost nothing about what it looks like, so the
+right-hand panel renders that one part alone, framed tight. It shares its
+renderer with the namer — the same offscreen setup that shoots the pictures the
+model is asked about — opened on the first click rather than with the model, and
+each render kept once taken.
+
+The preview follows your edits, so it shows the model you are building rather
+than the file you opened: restyle a part to glass and it turns to glass, rotate
+or stretch it and it turns and stretches. Both the panel and the viewer compose
+an edit through the same code, which is what keeps them agreeing with each other
+and with the exporter. A *move* is the one edit it cannot show — the framing
+follows the part, so sliding the part around leaves the picture unchanged.
+
+### Two kinds of export
+
+| | What you get |
+|---|---|
+| **Model only** | The converted file, as before. |
+| **Model + details** | A ZIP holding the converted file *and* `parts.json`. |
+
+The document names its own format at the top:
+
+```json
+{
+  "format": "create-ar.parts",
+  "version": 1,
+  "model": { "file": "bike.glb", "sourceFile": "bike.step", "parts": 2 },
+  "parts": [
+    {
+      "index": 0,
+      "originalName": "Mesh_014",
+      "name": "Front Wheel Hub",
+      "details": {
+        "What it is": "...",
+        "Material": "...",
+        "What usually goes wrong": "..."
+      }
+    }
+  ]
+}
+```
+
+`details` is an ordered map of label to text and nothing more is assumed about
+it — the viewer and the export both just walk whatever is there, so a model that
+volunteers a useful heading nobody thought of keeps it.
+
+### Opening a bundle again
+
+Drop that ZIP back in and the app recognises it. The `format` marker is the whole
+point: plenty of pipelines write a file called `parts.json`, and without a marker
+one of those would be read as ours. The document has to be ours *and* have usable
+parts in it, or it is ignored and the model converts as any other archive would.
+
+Parts are matched by name first — the model inside a bundle was written with the
+names already applied, so a part's name in the file usually *is* the document's
+`name` — then by `originalName`, which catches a bundle whose model went out to a
+format that cannot carry names at all, and finally by index. Anything already
+edited in the session is left alone.
+
 ## Marking parts
 
 A click marks one part and drops whatever was marked before; **shift-click**
@@ -392,6 +560,14 @@ What is **not** handled, and should be before exposing this publicly:
 | `CONVERTER_JOB_TIMEOUT` | `600` | Seconds before a Blender run is killed. |
 | `CONVERTER_WORKERS` | `2` | Concurrent Blender processes. |
 | `CONVERTER_JOB_TTL` | `86400` | Seconds before finished jobs and files are swept. |
+| `AZURE_OPENAI_ENDPOINT` | unset | Seeds the part namer's Azure fields on first run. |
+| `AZURE_OPENAI_API_KEY` | unset | Likewise. Saved settings win from then on. |
+| `AZURE_OPENAI_DEPLOYMENT` | unset | Must accept images. |
+| `AZURE_OPENAI_API_VERSION` | `2024-10-21` | |
+
+Keys for the other three providers are typed on the settings page; see
+[Settings](#settings) for why `OPENAI_API_KEY` and `ANTHROPIC_API_KEY` are
+not read from the environment.
 
 Discovery deliberately skips the Windows `WindowsApps\blender.CMD` alias: it
 shells out to the detached GUI launcher, which never returns output to a
@@ -423,6 +599,9 @@ receive traffic.
 | `POST` | `/api/jobs/{id}/reexport` | Convert the same upload again: `target`, `options`. |
 | `GET` | `/api/jobs/{id}/download` | The converted file (or a zip). |
 | `GET` | `/api/jobs/{id}/preview` | GLB used by the in-browser viewer. |
+| `GET` | `/api/settings` | Part-naming settings. Never includes the API key. |
+| `PUT` | `/api/settings` | Save them; `?clear_key=<provider>` forgets one stored key. |
+| `POST` | `/api/name-parts` | Name one chunk of rendered parts. |
 
 ```bash
 curl -F file=@part.stp -F target=.usdz \
@@ -435,7 +614,8 @@ Conversion options: `scale`, `center` (`none`/`origin`/`floor`), `decimate`,
 (USD/USDZ), `cad_tolerance` (STEP/IGES), `archive_entry` to pick a specific
 model inside an archive, `renames` — a `{"old": "new"}` map of part names — and
 `edits`, a map of part name to `{"move": [x, y, z], "rotate": [x, y, z], "scale":
-[x, y, z], "material": "metal", "color": "#ff2200"}`. Both are applied between
+[x, y, z], "material": "metal", "color": "#ff2200"}`. `bundle` with
+`part_details` writes `parts.json` beside the model and zips the two together. Both are applied between
 import and export. Every edit field is a delta on the part's own local transform
 in the viewer's glTF-style Y-up axes, not Blender's Z-up; rotations are in
 degrees and scale is a multiplier per axis.

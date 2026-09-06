@@ -7,11 +7,12 @@ import {
   Environment, Grid, Html, Lightformer, OrbitControls, TransformControls, useGLTF,
 } from '@react-three/drei'
 import {
-  Box3, Box3Helper, Color, Euler, Matrix3, Matrix4, MeshPhysicalMaterial, Object3D,
-  Quaternion, Vector3,
+  Box3, Box3Helper, Color, Euler, Matrix3, Matrix4, Object3D, Quaternion, Vector3,
   type Group, type LineBasicMaterial, type Material, type Mesh,
 } from 'three'
-import { MATERIALS, NO_EDIT, type GizmoMode, type PartEdit } from '../api'
+import { NO_EDIT, type GizmoMode, type PartEdit } from '../api'
+import { buildMaterial, poseEdited } from '../partEdit'
+import { fileNames, partNodes, type NameSource } from '../partGraph'
 
 /**
  * Image-based lighting built from in-scene emissive panels.
@@ -34,63 +35,6 @@ function LocalEnvironment() {
       <Lightformer intensity={0.6} position={[0, -4, 0]} scale={[12, 12, 1]} rotation-x={-Math.PI / 2} />
     </Environment>
   )
-}
-
-/**
- * The name each part carries *in the file*, not the one three.js gives it.
- *
- * GLTFLoader puts every node name through PropertyBinding.sanitizeNodeName,
- * which strips `[`, `]`, `.`, `:` and `/` -- the characters its animation
- * binding syntax reserves -- and turns whitespace into underscores. Maya and
- * Sketchfab exports namespace their parts with a colon, so what the viewer
- * calls a part can differ from what the exporter wrote. Names are how an edit
- * or a rename finds its object when the model is converted again, so they have
- * to be the file's own; the loader keeps the mapping to recover them.
- */
-interface NameSource {
-  json?: { nodes?: { name?: string }[] }
-  associations?: Map<object, { nodes?: number }>
-}
-
-function fileNames(parser: NameSource | undefined): Map<Object3D, string> {
-  const out = new Map<Object3D, string>()
-  const nodes = parser?.json?.nodes
-  if (!parser?.associations || !nodes) return out
-  for (const [object, ref] of parser.associations) {
-    const index = (ref as { nodes?: number })?.nodes
-    if (index == null) continue
-    const name = nodes[index]?.name
-    if (name && (object as Object3D).isObject3D) out.set(object as Object3D, name)
-  }
-  return out
-}
-
-/** Does this node, or anything under it, actually draw something? */
-function hasGeometry(node: Object3D): boolean {
-  let found = false
-  node.traverse((n) => {
-    const o = n as { isMesh?: boolean; isPoints?: boolean; isLine?: boolean }
-    if (o.isMesh || o.isPoints || o.isLine) found = true
-  })
-  return found
-}
-
-/**
- * The nodes to treat as the assembly's parts.
- *
- * Exporters wrap scenes to differing depths -- glTF adds a `RootNode`, others a
- * single transform root -- so a fixed depth would explode one model and do
- * nothing to the next. Instead descend through single-child wrappers until a
- * level holds more than one drawable node: that is where the parts are.
- */
-function partNodes(scene: Object3D): Object3D[] {
-  let level = scene.children.filter(hasGeometry)
-  while (level.length === 1 && level[0].children.length) {
-    const next = level[0].children.filter(hasGeometry)
-    if (!next.length) break
-    level = next
-  }
-  return level.length > 1 ? level : []
 }
 
 /** Evenly spread directions, for parts that sit dead on the centre. */
@@ -170,56 +114,22 @@ function buildParts(scene: Object3D, names: Map<Object3D, string>): Assembly {
 }
 
 const DEG = Math.PI / 180
-const BLACK = new Color('#000000')
 // Big enough to grab on a busy model, and drawn after everything else.
 const GIZMO_SIZE = 1.4
 const GIZMO_ORDER = 10_000
 
 /**
- * The material an edited part is shown in.
+ * Put a part into its edited pose, plus however far the separation slider has
+ * pushed it out.
  *
- * Built fresh rather than cloned from the part's own: the export replaces the
- * material outright, textures included, so a preview that kept the original
- * maps would promise something the saved file does not deliver.
- */
-function buildMaterial(edit: PartEdit): Material {
-  const preset = MATERIALS[edit.material as keyof typeof MATERIALS]
-  const colour = new Color(edit.color)
-  return new MeshPhysicalMaterial({
-    color: colour,
-    metalness: preset.metalness,
-    roughness: preset.roughness,
-    transmission: preset.transmission,
-    thickness: preset.transmission ? 0.5 : 0,
-    ior: 1.45,
-    transparent: preset.transmission > 0,
-    emissive: preset.emission ? colour : BLACK,
-    emissiveIntensity: preset.emission,
-  })
-}
-
-/**
- * Put a part into its edited pose: its rest transform with the edit's deltas
- * laid on top, plus however far the separation slider has pushed it out.
- *
- * Position and separation are both parent-space translations and simply add.
- * Rotation multiplies on the right and scale multiplies componentwise, which is
- * what makes them pivot on the part's own origin -- and is exactly the
- * composition the exporter performs, so the preview is not an approximation.
+ * The edit itself is composed in partEdit, which the preview panel's offscreen
+ * renderer uses too. Separation is added on afterwards: it is a parent-space
+ * translation like the move, so the two simply add, and it belongs to the
+ * viewer alone -- it is a way of looking at the model, not part of the edit.
  */
 function poseNode(part: Part, edit: PartEdit, separation: number) {
-  const { node } = part
-  node.position.copy(part.base)
-    .add(new Vector3(edit.move[0], edit.move[1], edit.move[2]))
-    .addScaledVector(part.offset, separation)
-  node.quaternion.copy(part.baseQuat).multiply(
-    new Quaternion().setFromEuler(
-      new Euler(edit.rotate[0] * DEG, edit.rotate[1] * DEG, edit.rotate[2] * DEG, 'XYZ')))
-  node.scale.set(
-    part.baseScale.x * edit.scale[0],
-    part.baseScale.y * edit.scale[1],
-    part.baseScale.z * edit.scale[2],
-  )
+  poseEdited(part.node, part.base, part.baseQuat, part.baseScale, edit)
+  part.node.position.addScaledVector(part.offset, separation)
 }
 
 /**
