@@ -13,7 +13,7 @@ import {
 import { isRestyled, NO_EDIT, WHOLE, type Clip, type GizmoMode, type PartEdit } from '../api'
 import { applyPose, poseAbout, poseAt, REST } from '../animation'
 import { poseEdited, restyleNode } from '../partEdit'
-import { fileNames, partNodes, type NameSource } from '../partGraph'
+import { fileNames, NO_SIZES, partNodes, type NameSource, type PartSizes } from '../partGraph'
 import type { Player } from '../player'
 
 /**
@@ -59,21 +59,6 @@ interface Assembly {
    * model, which come from the same boxes.
    */
   scale: PartSizes
-}
-
-export interface PartSizes {
-  /** The model's longest side. */
-  model: number
-  /** Each part's longest side, in the same units. */
-  parts: number[]
-  /**
-   * Each part's face count.
-   *
-   * Here so the list can show which parts the namer will leave alone before a
-   * single request is spent: one face means no enclosed volume, which the agent
-   * always sets aside as a modelling artefact whatever the size floor says.
-   */
-  faces: number[]
 }
 
 interface Part {
@@ -151,7 +136,7 @@ function shelfSlots(sizes: Vector3[], extent: number): Vector3[] {
 function buildParts(scene: Object3D, names: Map<Object3D, string>): Assembly {
   scene.updateWorldMatrix(false, true)
   const nodes = partNodes(scene)
-  if (!nodes.length) return { parts: [], reach: 1, scale: { model: 1, parts: [], faces: [] } }
+  if (!nodes.length) return { parts: [], reach: 1, scale: NO_SIZES }
 
   const boxes = nodes.map((n) => new Box3().setFromObject(n))
   const whole = boxes.reduce((acc, b) => acc.union(b), new Box3())
@@ -212,6 +197,15 @@ function buildParts(scene: Object3D, names: Map<Object3D, string>): Assembly {
   })
 
   const longest = (v: Vector3) => Math.max(v.x, v.y, v.z)
+  const triple = (v: Vector3): [number, number, number] => [v.x, v.y, v.z]
+  // The assembly's box in the space the parts are moved in, which is not the
+  // union of the world boxes transformed -- a rotated parent would make that a
+  // different shape. Built from the parent-space part boxes instead.
+  const half = sizes.map((s) => s.clone().multiplyScalar(0.5))
+  const low = centres.map((c, i) => c.clone().sub(half[i]))
+  const high = centres.map((c, i) => c.clone().add(half[i]))
+  const min = low.reduce((a, b) => a.min(b), low[0].clone())
+  const max = high.reduce((a, b) => a.max(b), high[0].clone())
   return {
     parts,
     reach: extent,
@@ -228,6 +222,14 @@ function buildParts(scene: Object3D, names: Map<Object3D, string>): Assembly {
         })
         return Math.round(faces)
       }),
+      boxes: sizes.map(triple),
+      centres: centres.map(triple),
+      spins: nodes.map((node) => {
+        const q = node.quaternion
+        return [q.x, q.y, q.z, q.w] as [number, number, number, number]
+      }),
+      extents: triple(max.clone().sub(min)),
+      middle: triple(max.clone().add(min).multiplyScalar(0.5)),
     },
   }
 }

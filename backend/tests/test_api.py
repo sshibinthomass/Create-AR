@@ -802,8 +802,16 @@ def test_clips_are_cleaned_and_capped():
         Options(clips=[{"tracks": [{"target": "a", "keys": [{"time": -1.0}]}]}])
     with pytest.raises(ValidationError):
         Options(clips=[{"tracks": [{"target": "a", "keys": [{"time": 0, "scale": [0, 1, 1]}]}]}])
+    # A generated run makes a clip per motion per part, so the cap is high and
+    # what actually guards the exporter is the total keyframe count.
+    from app.main import MAX_CLIPS, MAX_TOTAL_KEYS
     with pytest.raises(ValidationError):
-        Options(clips=[{"tracks": [{"target": "a", "keys": []}]}] * 33)
+        Options(clips=[{"tracks": [{"target": "a", "keys": []}]}] * (MAX_CLIPS + 1))
+    with pytest.raises(ValidationError):
+        Options(clips=[
+            {"name": f"c{i}", "duration": 600.0,
+             "tracks": [{"target": f"p{i}", "keys": [{"time": t} for t in range(500)]}]}
+            for i in range((MAX_TOTAL_KEYS // 500) + 1)])
 
 
 def _lift_from_blender_job(name):

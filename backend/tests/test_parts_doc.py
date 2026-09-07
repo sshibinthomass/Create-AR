@@ -31,7 +31,9 @@ def test_a_document_carries_its_marker_and_every_part():
     )
     assert doc["format"] == parts_doc.FORMAT
     assert doc["model"] == {"file": "bike.glb", "sourceFile": "bike.fbx",
-                            "parts": 2, "indexMatchesFile": False}
+                            "parts": 2, "animations": 0,
+                            "indexMatchesFile": False,
+                            "animationIndexMatchesFile": False}
     assert [p["name"] for p in doc["parts"]] == ["Front Wheel", "Hex Bolt"]
     assert doc["parts"][0]["originalName"] == "Mesh_001"
     assert doc["parts"][0]["details"] == {"Purpose": "Rolls"}
@@ -317,3 +319,144 @@ def test_a_document_written_without_the_file_says_so():
     doc = parts_doc.build([detail(0, "Seat"), detail(1, "Base")],
                           model_file="m.glb", source_name="m.fbx")
     assert doc["model"]["indexMatchesFile"] is False
+
+
+# --- the animations -----------------------------------------------------------
+#
+# A glTF animation is a name and some curves. What it *does* -- which parts, how
+# far, along which axis -- has nowhere to live in the file, so it lives here,
+# beside the parts, for whatever later reads the bundle to answer questions with.
+
+def motion(name, **fields):
+    return parts_doc.AnimationDetail(name=name, **fields)
+
+
+def test_an_animation_is_described_beside_the_parts_it_moves():
+    doc = parts_doc.build(
+        [detail(0, "Seat plate")],
+        model_file="chair.glb", source_name="chair.fbx",
+        animations=[motion("Raise the seat plate", duration=2.5, kind="raise",
+                           targets=["Mesh_001"], labels=["Seat plate"],
+                           axis="y", amount=0.21,
+                           summary="Lifts the seat plate 0.21 straight up.",
+                           tags=["height", "adjust"])],
+    )
+    assert doc["model"]["animations"] == 1
+    assert doc["animations"][0] == {
+        "index": 0, "name": "Raise the seat plate", "duration": 2.5,
+        "kind": "raise", "targets": ["Mesh_001"], "labels": ["Seat plate"],
+        "axis": "y", "amount": 0.21,
+        "summary": "Lifts the seat plate 0.21 straight up.",
+        "tags": ["height", "adjust"],
+    }
+
+
+def test_a_model_with_no_animations_still_has_the_section():
+    """An empty list, not a missing key: a reader should never have to ask."""
+    doc = parts_doc.build([detail(0, "Seat")], model_file="m.glb", source_name="m.glb")
+    assert doc["animations"] == []
+    assert doc["model"]["animations"] == 0
+
+
+def test_an_axis_that_is_not_an_axis_is_dropped():
+    made = motion("Wobble", axis="w").cleaned()
+    assert made["axis"] == ""
+
+
+def gltf_with_clips(names, clips):
+    document = gltf(names)
+    document["animations"] = [{"name": name, "channels": [], "samplers": []}
+                              for name in clips]
+    return document
+
+
+def test_the_animation_indices_are_moved_to_where_the_clips_really_are(tmp_path):
+    """The exporter reorders the clips exactly as it reorders the parts."""
+    written = write_glb(tmp_path / "m.glb", gltf_with_clips(
+        ["Base", "Seat"], ["Show the seat", "Raise the seat", "Spin the base"]))
+    doc = parts_doc.build(
+        [detail(0, "Base"), detail(1, "Seat")],
+        model_file="m.glb", source_name="m.fbx", written=written,
+        animations=[motion("Raise the seat"), motion("Spin the base"),
+                    motion("Show the seat")])
+
+    assert doc["model"]["animationIndexMatchesFile"] is True
+    assert {a["name"]: a["index"] for a in doc["animations"]} == {
+        "Show the seat": 0, "Raise the seat": 1, "Spin the base": 2}
+
+
+def test_a_clip_missing_from_the_file_leaves_every_animation_index_alone(tmp_path):
+    written = write_glb(tmp_path / "m.glb",
+                        gltf_with_clips(["Base", "Seat"], ["Raise the seat"]))
+    doc = parts_doc.build(
+        [detail(0, "Base"), detail(1, "Seat")],
+        model_file="m.glb", source_name="m.fbx", written=written,
+        animations=[motion("Raise the seat", index=0),
+                    motion("Spin the base", index=1)])
+
+    assert doc["model"]["animationIndexMatchesFile"] is False
+    assert [a["index"] for a in doc["animations"]] == [0, 1]
+
+
+def test_a_version_one_document_reads_back_as_one_with_no_animations(tmp_path):
+    root = tmp_path / "old"
+    root.mkdir()
+    (root / parts_doc.FILENAME).write_text(json.dumps({
+        "format": parts_doc.FORMAT, "version": 1,
+        "parts": [{"index": 0, "name": "Seat"}],
+    }), encoding="utf-8")
+    found = parts_doc.find(root)
+    assert found is not None
+    assert found["animations"] == []
+
+
+def test_a_document_carrying_animations_reads_them_back(tmp_path):
+    root = tmp_path / "bundle"
+    root.mkdir()
+    doc = parts_doc.build(
+        [detail(0, "Seat")], model_file="m.glb", source_name="m.glb",
+        animations=[motion("Raise the seat", kind="raise", axis="y", amount=0.2,
+                           tags=["height"])])
+    parts_doc.write(doc, root)
+    back = parts_doc.find(root)
+    assert back is not None
+    assert back["animations"][0]["kind"] == "raise"
+    assert back["animations"][0]["tags"] == ["height"]
+
+
+def test_rubbish_in_the_animation_list_is_skipped_not_fatal():
+    kept = parts_doc.clean_animations(
+        ["not an object", {"name": "Raise the seat", "kind": "raise"}, 7])
+    assert [a["name"] for a in kept] == ["Raise the seat"]
+
+
+# --- the animations, as the conversion option carries them --------------------
+
+def test_a_clip_can_say_what_it_means():
+    from app.main import Clip
+    clip = Clip(name="Raise the seat", duration=2.5,
+                tracks=[{"target": "Seat", "keys": [{"time": 0}, {"time": 2.5}]}],
+                meta={"kind": "raise", "targets": ["Seat"], "labels": ["Seat"],
+                      "axis": "y", "amount": 0.2,
+                      "summary": "Lifts the seat.", "tags": ["Height", " height "]})
+    assert clip.meta is not None
+    assert clip.meta.kind == "raise"
+    # Tags are lowercased and deduplicated: they exist to be matched against.
+    assert clip.meta.tags == ["height"]
+
+
+def test_a_clip_keyed_by_hand_says_nothing_about_itself():
+    from app.main import Clip
+    clip = Clip(name="Animation 1",
+                tracks=[{"target": "Seat", "keys": [{"time": 0}]}])
+    assert clip.meta is None
+
+
+def test_a_generated_run_of_animations_is_not_too_many_to_send():
+    """A forty-part assembly generates well over a hundred clips."""
+    opts = Options(clips=[
+        {"name": f"Clip {i}", "duration": 2.5,
+         "tracks": [{"target": f"Part {i}", "keys": [{"time": 0}, {"time": 2.5}]}]}
+        for i in range(200)])
+    assert len(opts.clips) == 200
+

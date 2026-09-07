@@ -54,6 +54,26 @@ export interface PartsDocEntry {
   details: PartDetails
 }
 
+/**
+ * One animation, as parts.json records it.
+ *
+ * The clip itself is in the model file; this is what it means. `index` is the
+ * clip's position in the file's animation list, so a reader that has picked an
+ * entry here knows which animation to play.
+ */
+export interface PartsDocAnimation {
+  index: number
+  name: string
+  duration: number
+  kind: string
+  targets: string[]
+  labels: string[]
+  axis: string
+  amount: number
+  summary: string
+  tags: string[]
+}
+
 /** The parts.json written beside a model, and read back out of a bundle. */
 export interface PartsDoc {
   format: string
@@ -61,6 +81,8 @@ export interface PartsDoc {
   generatedAt: string
   model: { file?: string; sourceFile?: string; parts?: number }
   parts: PartsDocEntry[]
+  /** Absent on documents written before animations were described. */
+  animations?: PartsDocAnimation[]
 }
 
 export type JobStatus = 'queued' | 'running' | 'done' | 'error'
@@ -141,6 +163,54 @@ export interface Track {
   pivot?: [number, number, number]
 }
 
+/**
+ * The motions the generator knows how to build, one clip each.
+ *
+ * They are named for what the movement *is*, not for which channel it uses, so
+ * that a reader picking a clip out of a list -- a person or a model answering a
+ * question about the product -- is choosing between "take it off" and "swing it
+ * open" rather than between two rotations. `merged` is the odd one out: a clip
+ * assembled from others rather than generated from a part.
+ */
+export type MotionKind =
+  | 'spin' | 'hinge' | 'unscrew'
+  | 'slide' | 'raise' | 'detach'
+  | 'highlight'
+  | 'turntable' | 'explode'
+  | 'merged'
+
+/**
+ * What a clip *means*, written down beside it.
+ *
+ * A clip on its own is numbers: a part name, some poses and some times. That is
+ * enough to play it and nothing like enough to choose it. Every generated clip
+ * therefore carries this -- what moves, how far, along which axis, and a
+ * sentence saying so -- and it travels into parts.json with the model, so a
+ * later reader can answer "how do I raise the seat?" by matching the question
+ * against `summary` and `tags` and handing back the clips that fit.
+ *
+ * A clip made by hand has no meta. That is not a gap to fill in: it means
+ * nobody has said what the clip is for, and a reader should leave it alone.
+ */
+export interface ClipMeta {
+  kind: MotionKind
+  /** The parts the clip drives, by the name the file gives them. '' is the whole model. */
+  targets: string[]
+  /** The same parts under the names a person would recognise. */
+  labels: string[]
+  /** The axis the motion runs along or turns about, in the viewer's Y-up axes. */
+  axis: 'x' | 'y' | 'z' | ''
+  /**
+   * Degrees for a turn, model units for a travel, a factor for a scale -- or,
+   * on a `merged` clip, how many clips went into it.
+   */
+  amount: number
+  /** One sentence saying what the clip does. What a question is matched against. */
+  summary: string
+  /** Words a question might use for this clip: 'height', 'remove', 'adjust'. */
+  tags: string[]
+}
+
 /** One named animation: how long it runs, and the tracks that play in it. */
 export interface Clip {
   /** Only the browser's: tells two clips of the same name apart in the list. */
@@ -148,6 +218,8 @@ export interface Clip {
   name: string
   duration: number  // seconds
   tracks: Track[]
+  /** Present on generated and merged clips; absent on ones made by hand. */
+  meta?: ClipMeta
 }
 
 /** A small tweak to one part, made in the Analysis tab: a pose held still, and a finish. */

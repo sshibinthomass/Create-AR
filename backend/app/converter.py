@@ -240,14 +240,28 @@ def convert(
         shutil.copyfile(primary, preview)
 
     details = [parts_doc.PartDetail(**d) for d in options.get("part_details") or []]
+    # Only the clips that carry a description: one keyed by hand says nothing
+    # about itself, and an entry saying nothing is worse than no entry at all.
+    described = [
+        parts_doc.AnimationDetail(index=at, name=clip.get("name", ""),
+                                  duration=clip.get("duration", 0.0),
+                                  **(clip.get("meta") or {}))
+        # Numbered by where the clip sits among the ones being written, which is
+        # the order the exporter was handed. parts_doc corrects them against the
+        # written file where it can read the order back out of it.
+        for at, clip in enumerate(options.get("clips") or [])
+        if isinstance(clip.get("meta"), dict)
+    ]
     bundle = bool(options.get("bundle")) and bool(details)
     if bundle:
         written = parts_doc.write(
             parts_doc.build(details, model_file=primary.name,
-                            source_name=source.name, written=primary),
+                            source_name=source.name, written=primary,
+                            animations=described),
             out_dir,
         )
-        on_log(f"Wrote {written.name}: {len(details)} parts")
+        on_log(f"Wrote {written.name}: {len(details)} parts"
+               + (f", {len(described)} animations" if described else ""))
 
     download_path, download_name = _package_outputs(
         out_dir, primary, stem, target_ext, force=bundle)

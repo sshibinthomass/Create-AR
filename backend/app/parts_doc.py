@@ -12,6 +12,14 @@ Nothing here assumes which fields a description has. `details` is an ordered map
 of label to text, whatever labels the model chose -- what a bearing is worth
 saying about differs from what a wiring loom is worth saying about, and a fixed
 schema would either cramp one or pad the other.
+
+The animations travel the same way and for the same reason. A glTF animation is
+a name and some curves; there is nowhere in it to say that this one raises the
+seat by a fifth of the chair's height, or that a question about how tall the
+chair goes should be answered with it. So each clip's meaning is written here,
+indexed by where the clip sits in the file's animation list, beside the parts it
+moves. Read the two sections together and the file describes both what the thing
+is made of and what it does.
 """
 
 from __future__ import annotations
@@ -24,7 +32,9 @@ from pathlib import Path
 from pydantic import BaseModel, ConfigDict, Field
 
 FORMAT = "create-ar.parts"
-VERSION = 1
+# 2 added the "animations" section. A version 1 document is still perfectly
+# readable -- it simply describes a model that had no animations described.
+VERSION = 2
 FILENAME = "parts.json"
 
 MAX_PARTS = 500
@@ -32,6 +42,9 @@ MAX_NAME_LEN = 120
 MAX_FIELDS = 16
 MAX_LABEL_LEN = 60
 MAX_TEXT_LEN = 2000
+MAX_ANIMATIONS = 500
+MAX_SUMMARY_LEN = 600
+MAX_TAGS = 32
 # A whole document, on the way back in. Generous next to 500 parts of prose,
 # tight enough that a hostile zip cannot make the server chew through a gigabyte.
 MAX_DOC_BYTES = 4 * 1024 * 1024
@@ -92,6 +105,68 @@ class PartDetail(BaseModel):
             "name": " ".join(self.name.split())[:MAX_NAME_LEN],
             "details": clean_details(self.details),
         }
+
+
+class AnimationDetail(BaseModel):
+    """One animation, as the browser worked out what it means.
+
+    The clip itself is in the model file. This is the half a file cannot hold:
+    which parts move, which way, how far, and a sentence saying so. ``name`` is
+    what a reader should join on -- it is written into the file as the
+    animation's own name and survives whatever the exporter does to the order.
+
+    Nothing here is derived from the file. It is what the generator decided when
+    it built the clip, carried through unchanged, so a description that has
+    drifted from the motion means the generator drifted, not the document.
+    """
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    index: int = Field(0, ge=0)
+    name: str = Field("", max_length=MAX_NAME_LEN)
+    duration: float = 0.0
+    # Which of the generator's motions this is: "raise", "spin", "detach"...
+    # Free text rather than an enumeration, because the document outlives any
+    # particular list of motions and a reader that meets an unknown one should
+    # fall back to the summary rather than reject the file.
+    kind: str = Field("", max_length=32)
+    targets: list[str] = Field(default_factory=list)
+    labels: list[str] = Field(default_factory=list)
+    axis: str = Field("", max_length=1)
+    amount: float = 0.0
+    summary: str = Field("", max_length=MAX_SUMMARY_LEN)
+    tags: list[str] = Field(default_factory=list)
+
+    def cleaned(self) -> dict:
+        trim = lambda values: [  # noqa: E731 -- one expression, used twice
+            " ".join(str(v).split())[:MAX_NAME_LEN] for v in values[:MAX_PARTS]]
+        return {
+            "index": self.index,
+            "name": " ".join(self.name.split())[:MAX_NAME_LEN],
+            "duration": round(float(self.duration), 3),
+            "kind": " ".join(self.kind.split())[:32],
+            "targets": trim(self.targets),
+            "labels": trim(self.labels),
+            "axis": self.axis if self.axis in ("x", "y", "z") else "",
+            "amount": round(float(self.amount), 4),
+            "summary": " ".join(self.summary.split())[:MAX_SUMMARY_LEN],
+            "tags": trim(self.tags)[:MAX_TAGS],
+        }
+
+
+def clean_animations(raw: object) -> list[dict]:
+    """An ``animations`` section read back out of a document, or an empty list."""
+    if not isinstance(raw, list):
+        return []
+    out: list[dict] = []
+    for entry in raw[:MAX_ANIMATIONS]:
+        if not isinstance(entry, dict):
+            continue
+        try:
+            out.append(AnimationDetail(**entry).cleaned())
+        except (TypeError, ValueError):
+            continue
+    return out
 
 
 # glTF's magic, and the tag on its JSON chunk. Only the first chunk is read:
@@ -183,36 +258,68 @@ def export_order(path: Path) -> list[str]:
     return [str((nodes[i] or {}).get("name") or "") for i in level]
 
 
-def renumbered(parts: list[dict], order: list[str]) -> tuple[list[dict], bool]:
-    """Point every entry's index at where that part really sits in the file.
+def animation_order(path: Path) -> list[str]:
+    """The animation names in the order the written file lists them.
+
+    The same problem ``export_order`` solves for parts, and for the same reason:
+    Blender's glTF exporter walks its own collections, not the order the clips
+    arrived in, so a document that numbered them as sent would point a reader at
+    the wrong animation. An empty list means the format carries no readable
+    animation list, and the numbers are left as they were sent.
+    """
+    found = _gltf_json(path)
+    clips = (found or {}).get("animations")
+    if not isinstance(clips, list):
+        return []
+    return [str((clip or {}).get("name") or "") for clip in clips
+            if isinstance(clip, dict)]
+
+
+def renumbered(entries: list[dict], order: list[str]) -> tuple[list[dict], bool]:
+    """Point every entry's index at where it really sits in the written file.
+
+    Used for both sections, which have the same problem: the exporter does not
+    preserve the order things were sent in, and both a part and an animation
+    carry a ``name`` that survives the export.
 
     All or nothing: a partial renumber would leave the document half describing
     one order and half another, which is worse than describing the order it was
-    given. So unless every part is found exactly once in the written file, the
-    indices are left alone and the document says they were not confirmed.
+    given. So unless every entry is found in the written file, the indices are
+    left alone and the document says they were not confirmed.
     """
     if not order:
-        return parts, False
+        return entries, False
     at = {}
     for position, name in enumerate(order):
         at.setdefault(name, position)
-    if any(part["name"] not in at for part in parts):
-        return parts, False
-    return [{**part, "index": at[part["name"]]} for part in parts], True
+    if any(entry["name"] not in at for entry in entries):
+        return entries, False
+    return [{**entry, "index": at[entry["name"]]} for entry in entries], True
 
 
 def build(parts: list[PartDetail], *, model_file: str, source_name: str,
-          written: Path | None = None) -> dict:
+          written: Path | None = None,
+          animations: list[AnimationDetail] | None = None) -> dict:
     """The document to write beside a model being exported.
 
-    ``written`` is the exported file itself. When it is a glTF the part order is
-    read back out of it, because the export does not preserve the order the
-    parts were sent in -- see ``export_order``.
+    ``written`` is the exported file itself. When it is a glTF both orders are
+    read back out of it, because the export preserves neither the order the
+    parts were sent in nor the order the clips were -- see ``export_order`` and
+    ``animation_order``.
+
+    ``animations`` describes only the clips that were actually written. A clip
+    keyed by hand has nothing to say about itself and is simply absent, which is
+    why the count in ``model`` is the number described rather than the number in
+    the file.
     """
     cleaned = [p.cleaned() for p in parts[:MAX_PARTS]]
     confirmed = False
+    clips = [a.cleaned() for a in (animations or [])[:MAX_ANIMATIONS]]
+    clips_confirmed = False
     if written is not None and written.exists():
         cleaned, confirmed = renumbered(cleaned, export_order(written))
+        if clips:
+            clips, clips_confirmed = renumbered(clips, animation_order(written))
     return {
         "format": FORMAT,
         "version": VERSION,
@@ -221,12 +328,16 @@ def build(parts: list[PartDetail], *, model_file: str, source_name: str,
             "file": model_file,
             "sourceFile": source_name,
             "parts": len(parts),
+            "animations": len(clips),
             # Whether "index" was checked against the file beside this document
             # or is only the order the parts were sent in. A reader that needs
             # certainty should join on "originalName", which survives either way.
             "indexMatchesFile": confirmed,
+            # The same question for the animations, which join on "name".
+            "animationIndexMatchesFile": clips_confirmed,
         },
         "parts": cleaned,
+        "animations": clips,
     }
 
 
@@ -266,6 +377,10 @@ def _validate(raw: object) -> dict | None:
         "generatedAt": str(raw.get("generatedAt", ""))[:40],
         "model": model if isinstance(model, dict) else {},
         "parts": kept,
+        # Absent on a version 1 document, which described no animations. An
+        # empty list rather than a missing key, so a reader never has to ask
+        # which kind of document it is holding.
+        "animations": clean_animations(raw.get("animations")),
     }
 
 

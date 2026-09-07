@@ -454,8 +454,9 @@ The document names its own format at the top:
 ```json
 {
   "format": "create-ar.parts",
-  "version": 1,
-  "model": { "file": "bike.glb", "sourceFile": "bike.step", "parts": 2 },
+  "version": 2,
+  "model": { "file": "bike.glb", "sourceFile": "bike.step", "parts": 2,
+             "animations": 1 },
   "parts": [
     {
       "index": 0,
@@ -467,6 +468,20 @@ The document names its own format at the top:
         "What usually goes wrong": "..."
       }
     }
+  ],
+  "animations": [
+    {
+      "index": 0,
+      "name": "Spin the front wheel hub",
+      "duration": 3,
+      "kind": "spin",
+      "targets": ["Mesh_014"],
+      "labels": ["Front Wheel Hub"],
+      "axis": "x",
+      "amount": 360,
+      "summary": "Turns \"Front Wheel Hub\" a full 360° about its x axis...",
+      "tags": ["spin", "rotate", "turn", "wheel", "hub"]
+    }
   ]
 }
 ```
@@ -474,6 +489,15 @@ The document names its own format at the top:
 `details` is an ordered map of label to text and nothing more is assumed about
 it — the viewer and the export both just walk whatever is there, so a model that
 volunteers a useful heading nobody thought of keeps it.
+
+`animations` is the same idea for the clips in the file beside it. A glTF
+animation is a name and some curves; there is nowhere in it to say that this one
+raises the seat by a fifth of the chair's height, or that a question about how
+tall the chair goes should be answered with it. So each clip's meaning is
+written here instead, joined to the file on `name`. Only clips that carry a
+description are listed — one keyed by hand says nothing about itself, and an
+entry saying nothing would be worse than no entry. A version 1 document has no
+`animations` key; read back, it comes through as an empty list.
 
 ### Opening a bundle again
 
@@ -627,6 +651,47 @@ and length, and the one highlighted in the list is the one the timeline shows
 and the viewer plays. A keyframe is a pose at a moment: where a part is, how it
 is turned, how big it is. Between two keyframes the part travels in a straight
 line; before the first and after the last it holds still.
+
+### Generating them from the model
+
+Keying a chair by hand is a hundred small decisions, and the model has already
+made most of them. **Generate** at the top of the card builds a clip for every
+motion each part can plausibly make: a rod slides along its length, a panel
+swings, a part sitting off-centre comes away outwards, and every part gets a
+swell that picks it out of the assembly. Nothing is asked of a model — the rules
+read the boxes the viewer measured and the descriptions the namer wrote, so a
+run costs nothing and can be thrown away.
+
+Four switches decide what a run makes, and the count updates as you press them:
+
+| | |
+|---|---|
+| **Turns** | Spins, swings and unscrews — a castor turns, a backrest reclines, a bolt backs out over two turns. |
+| **Moves** | Slides, lifts and removals. A gas lift raises; a cover comes off. |
+| **Highlights** | A swell and settle, so a part can be pointed at. |
+| **Whole model** | A turntable, and an exploded view of every part at once. |
+
+A forty-part assembly comes out with well over a hundred animations, which is
+the point: they are meant to be chosen from, not watched end to end.
+
+**Name the parts first.** The words the namer wrote are doing real work — `bolt`
+in a description is what separates a two-turn unscrew from a plain slide, and no
+amount of bounding-box arithmetic recovers it. The names also become the
+animations' names: *Raise the gas lift cylinder*, *Spin the castor (lower
+right)*, *Unscrew the M6 bolt*. Where two parts would produce the same name they
+are told apart by where they sit, and only numbered where even that is the same.
+
+Generating again replaces what the last run made and leaves the clips you keyed
+by hand alone, so naming the parts and running it again costs you nothing. A
+generated clip has a square marker rather than a round one in the list, and
+hovering it says what it does.
+
+Every generated animation also carries a description of itself — which parts,
+which axis, how far, and a sentence — which is written into `parts.json` when
+you save a bundle. A viewer can play a clip from the file; only the document
+says which clip answers *how do I make the chair taller*.
+
+### Keying them by hand
 
 Keying works the way animation tools have always worked once recording is on:
 
@@ -959,7 +1024,16 @@ alongside the geometry counts, and the job reports `sourceSize` next to
 `move`, `rotate` and `scale` deltas an edit does, laid on top of the edit. A
 target of `""` is the whole model, and that track carries a `pivot` to turn it
 about. Clips are only accepted for targets whose `can_animate` is true in
-`/api/formats`; the rest answer `400`.
+`/api/formats`; the rest answer `400`. Up to 500 clips per job and 100,000
+keyframes across all of them.
+
+A clip may also carry `meta`, which says what it *means*: `{"kind": "raise",
+"targets": ["Seat"], "labels": ["Seat plate"], "axis": "y", "amount": 0.21,
+"summary": "...", "tags": ["height", "adjust"]}`. The exporter has no use for it
+— glTF has nowhere to put a sentence — but with `bundle` on it is written into
+`parts.json` under `animations`, numbered against the animation order the
+written file actually ended up in and joined on the clip's `name`. Clips without
+`meta` are simply absent from that list.
 
 ## Sample models
 
@@ -1015,16 +1089,19 @@ frontend/src/
   App.tsx          shell: health/capabilities and the two tabs
   useConversion.ts upload + job polling, shared by both tabs
   views/           ConvertView (format → options → result), AnalysisView
-  partGraph.ts     which nodes count as parts, shared by the viewer and the shots
+  partGraph.ts     which nodes count as parts, and the sizes measured off them --
+                   here rather than in the viewer, which is a lazy-loaded chunk
   partShots.ts     the offscreen studio: neighbourhood, isolated, context, survey
   useNamer.ts      the plain run: render everything, then ask in chunks
   useAgent.ts      the agent's eyes: render what it asked for, put its questions
   usePartShot.ts   one part rendered alone, for the preview and the dialog
-  animation.ts     clips and keyframes: the blend the viewer plays and Blender bakes
+  animation.ts     clips and keyframes: the blend the viewer plays and Blender bakes,
+                   and merging several clips into the one thing to press play on
+  animGen.ts       the rules: a part's box and its description -> its animations
   player.ts        the clock a clip plays to, kept outside React
   components/      Dropzone, OptionsPanel, ModelViewer (three.js + explode),
                    PartEditor, PartPreview, PartDialog (one part, full size),
                    AgentAsk (where the run stops for a person), AgentReport,
-                   AnimEditor (pose at the playhead), Timeline
+                   AnimEditor (pose at the playhead), AnimGenerator, Timeline
 docs/FORMATS.md    what each engine actually provides, and why
 ```

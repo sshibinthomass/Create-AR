@@ -232,6 +232,66 @@ export function reverseClip(clip: Clip): Clip {
   }
 }
 
+/**
+ * Several clips played as one: all at once, or one after another.
+ *
+ * This is how an answer gets shown. A question like "how do I raise the seat?"
+ * is answered by a handful of clips -- find the lever, turn it, lift the seat --
+ * and what the person asking wants is one thing to press play on, not three.
+ * `sequence` lays them end to end for a set of steps; `together` overlays them
+ * for motions that happen at the same time.
+ *
+ * A part keeps whatever pose the clip before it left it in, because `poseAt`
+ * holds a track after its last key. That is what a sequence of steps means: a
+ * cover taken off in step one is still off in step three.
+ *
+ * Where two clips key the same part at the same instant, the earlier one in the
+ * list wins -- the opposite of `setKey`'s own rule, and deliberately. In a
+ * sequence the contested instant is always the boundary between two steps: the
+ * pose the first step arrives at, and the rest pose the second sets out from.
+ * Letting the second win would cancel the first step outright, so that a clip
+ * that raised a seat travels towards a key that has been replaced by rest and
+ * never moves at all.
+ */
+export function mergeClips(
+  clips: readonly Clip[], name: string, mode: 'sequence' | 'together' = 'sequence',
+): Clip {
+  let out = newClip(name, DEFAULT_DURATION)
+  let offset = 0
+  const pivots = new Map<string, [number, number, number]>()
+  for (const c of clips) {
+    for (const t of c.tracks) {
+      if (t.pivot) pivots.set(t.target, t.pivot)
+      for (const k of t.keys) {
+        const when = round(offset + k.time)
+        if (keyAt(out, t.target, when)) continue
+        out = setKey(out, t.target, when, pose(k), k.ease)
+      }
+    }
+    if (mode === 'sequence') offset += c.duration
+  }
+  const duration = mode === 'sequence'
+    ? offset
+    : clips.reduce((longest, c) => Math.max(longest, c.duration), 0)
+  return {
+    ...out,
+    // Merging nothing still has to give back a playable clip: a length of zero
+    // is not a clip, and the exporter refuses one.
+    duration: duration || DEFAULT_DURATION,
+    tracks: out.tracks.map((t) => (pivots.has(t.target)
+      ? { ...t, pivot: pivots.get(t.target) } : t)),
+    meta: {
+      kind: 'merged',
+      targets: [...new Set(clips.flatMap((c) => c.meta?.targets ?? []))],
+      labels: [...new Set(clips.flatMap((c) => c.meta?.labels ?? []))],
+      axis: '',
+      amount: clips.length,
+      summary: clips.map((c) => c.meta?.summary ?? c.name).join(' '),
+      tags: [...new Set(clips.flatMap((c) => c.meta?.tags ?? []))],
+    },
+  }
+}
+
 /** A copy of a clip, under a new name and with an id of its own. */
 export function copyClip(clip: Clip, name: string): Clip {
   counter += 1

@@ -578,7 +578,9 @@ input[type='range'] { width: 110px; accent-color: var(--accent); }
 .card-head .head-note + .head-switch { margin-left: 0; }
 .head-note.off { color: var(--dim); }
 
-.clips { display: flex; flex-direction: column; }
+/* A generated run is a hundred rows and more, which is what it is for -- but
+   it cannot be allowed to push the rest of the page off the screen. */
+.clips { display: flex; flex-direction: column; max-height: 340px; overflow-y: auto; }
 .clip-row {
   display: flex; align-items: center; gap: 9px;
   padding: 6px 16px; border-top: 1px solid var(--line-soft);
@@ -591,6 +593,8 @@ input[type='range'] { width: 110px; accent-color: var(--accent); }
   border: 1.5px solid var(--dim);
 }
 .clip-row.on .clip-dot { background: var(--accent); border-color: var(--accent); }
+/* Square rather than round: this one was worked out from the model, not keyed. */
+.clip-dot.made { border-radius: 2px; }
 .clip-row input {
   flex: 1; min-width: 0; width: auto;
   background: var(--panel-2); border: 1px solid var(--line); color: var(--text);
@@ -612,6 +616,27 @@ input[type='range'] { width: 110px; accent-color: var(--accent); }
   border-radius: 7px; padding: 5px 11px; font-size: 12px;
 }
 .clip-add:hover { color: var(--accent); border-color: var(--accent); }
+
+.gen { padding: 12px 16px 14px; border-top: 1px solid var(--line-soft); }
+.gen-head { display: flex; align-items: baseline; gap: 10px; }
+.gen-title { font-size: 13px; font-weight: 600; }
+.gen-count {
+  margin-left: auto; font-size: 11px; color: var(--dim);
+  font-variant-numeric: tabular-nums;
+}
+.gen-picks { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
+.gen-pick {
+  padding: 4px 10px; border-radius: 999px; font-size: 12px;
+  background: none; border: 1px solid var(--line); color: var(--muted);
+}
+.gen-pick:hover { color: var(--text); }
+.gen-pick.on {
+  background: var(--accent-soft); border-color: var(--accent); color: var(--accent);
+  font-weight: 600;
+}
+.gen-acts { display: flex; align-items: center; gap: 10px; margin-top: 12px; }
+.gen-note { font-size: 11px; color: var(--dim); }
+.gen .note { margin-top: 10px; }
 
 .anim-subject {
   display: flex; align-items: center; justify-content: space-between; gap: 12px;

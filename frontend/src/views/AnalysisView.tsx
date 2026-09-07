@@ -7,10 +7,12 @@ import {
 import {
   copyClip, newClip, pruneClips, restAxes, reverseClip, setKey, splitPose, unpivot,
 } from '../animation'
-import type { PartSizes } from '../components/ModelViewer'
+import type { GenInput } from '../animGen'
+import { NO_SIZES, type PartSizes } from '../partGraph'
 import AgentAsk from '../components/AgentAsk'
 import AgentReport from '../components/AgentReport'
 import AnimEditor from '../components/AnimEditor'
+import AnimGenerator from '../components/AnimGenerator'
 import Dropzone from '../components/Dropzone'
 import PartDialog from '../components/PartDialog'
 import PartEditor from '../components/PartEditor'
@@ -79,7 +81,7 @@ export default function AnalysisView({
   // Every part's longest side and the model's, from the viewer. What the size
   // floor below is measured against, and what lets the list say which parts it
   // takes in before a single request is spent.
-  const [sizes, setSizes] = useState<PartSizes>({ model: 1, parts: [], faces: [] })
+  const [sizes, setSizes] = useState<PartSizes>(NO_SIZES)
   // Leave parts under this fraction of the model's longest side alone, as a
   // percentage. Seeded from the saved setting; the slider decides per run.
   const [floor, setFloor] = useState(0)
@@ -176,6 +178,28 @@ export default function AnalysisView({
       return [...all.slice(0, at), made, ...all.slice(at)]
     })
   }, [])
+
+  /**
+   * Take a generated run's clips, keeping the ones made by hand.
+   *
+   * A run is meant to be thrown away and repeated -- name the parts, generate,
+   * see that the names are better, generate again -- so re-running replaces
+   * what the last run left and nothing else. A clip is the generator's if it
+   * carries a meta it wrote; one merged out of others is not, because somebody
+   * chose to build it.
+   */
+  const takeGenerated = useCallback((made: Clip[]) => {
+    setClips((all) => {
+      const mine = all.filter((c) => !c.meta || c.meta.kind === 'merged')
+      setClipId(made[0]?.id ?? mine[0]?.id ?? null)
+      return [...mine, ...made]
+    })
+    setAnimate(true)
+  }, [])
+
+  /** How many of the clips came from the last run, and a new one would replace. */
+  const generated = useMemo(
+    () => clips.filter((c) => c.meta && c.meta.kind !== 'merged').length, [clips])
 
   /** Turning animation on for the first time gives you a clip to start in. */
   const toggleAnimate = useCallback((on: boolean) => {
@@ -287,6 +311,33 @@ export default function AnalysisView({
   // The parts still in the model: what the timeline offers to mark, since a
   // part left out of the save has nothing to animate.
   const living = useMemo(() => parts.filter((n) => !gone.has(n)), [parts, gone])
+
+  /**
+   * Everything the animation rules read, with the deleted parts left out.
+   *
+   * The geometry arrives indexed by the model's full set of parts, so dropping
+   * a part means dropping its box and its centre with it -- a run keyed on
+   * mismatched indices would animate the wrong things and look, at a glance,
+   * as though it had worked.
+   */
+  const genInput = useMemo<GenInput>(() => {
+    const keep = parts.map((n, i) => (gone.has(n) ? -1 : i)).filter((i) => i >= 0)
+    const pick = <T,>(all: readonly T[]) => keep.map((i) => all[i])
+    return {
+      parts: keep.map((i) => parts[i]),
+      geometry: {
+        boxes: pick(sizes.boxes),
+        centres: pick(sizes.centres),
+        spins: pick(sizes.spins),
+        // The whole model's, deleted parts included: how big the thing is, and
+        // which way is outward, are not changed by leaving a bolt out of it.
+        extents: sizes.extents,
+        middle: sizes.middle,
+      },
+      labels: renames,
+      details,
+    }
+  }, [parts, gone, sizes, renames, details])
 
   /** Leave a part out of the saved model. Its name and description stay put. */
   const drop = useCallback((name: string) => {
@@ -1048,6 +1099,13 @@ export default function AnalysisView({
 
             {animate && (
               <>
+                <AnimGenerator
+                  input={genInput}
+                  pivot={pivot}
+                  made={generated}
+                  onGenerate={takeGenerated}
+                />
+
                 <div className="clips">
                   {clips.map((c) => {
                     const keys = c.tracks.reduce((n, t) => n + t.keys.length, 0)
@@ -1055,9 +1113,10 @@ export default function AnalysisView({
                       <div
                         key={c.id}
                         className={`clip-row${c.id === clipId ? ' on' : ''}`}
+                        title={c.meta?.summary}
                         onClick={() => setClipId(c.id)}
                       >
-                        <span className="clip-dot" />
+                        <span className={`clip-dot${c.meta ? ' made' : ''}`} />
                         <input
                           value={c.name}
                           aria-label="Name of the animation"

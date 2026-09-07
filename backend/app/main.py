@@ -40,9 +40,21 @@ CHUNK = 1024 * 1024
 MAX_RENAMES = 500
 MAX_EDITS = 500
 MAX_REMOVALS = 500
-MAX_CLIPS = 32
+# A generated run makes one clip per motion per part, so a forty-part assembly
+# arrives with well over a hundred. They are individually tiny -- one track, two
+# or three keys -- which is why the cap that matters is the total below rather
+# than the count.
+MAX_CLIPS = 500
 MAX_TRACKS = 500
 MAX_KEYS = 500
+# What actually costs something: every keyframe is baked frame by frame into an
+# action. The per-clip caps multiply out to a number no real model reaches, so
+# this is the one that keeps a malformed request from asking Blender for a
+# hundred million samples.
+MAX_TOTAL_KEYS = 100_000
+MAX_TAGS = 32
+MAX_TAG_LEN = 40
+MAX_SUMMARY_LEN = 600
 MAX_CLIP_SECONDS = 600.0
 MAX_NAME_LEN = 120
 _SAFE_STEM = re.compile(r"[^A-Za-z0-9._-]+")
@@ -180,12 +192,58 @@ class Track(BaseModel):
         return [by_time[t] for t in sorted(by_time)]
 
 
+class ClipMeta(BaseModel):
+    """What a clip *means*, as the browser worked it out.
+
+    Carried through untouched and written into parts.json beside the model. The
+    exporter has no use for it -- glTF has nowhere to put a sentence -- but a
+    reader trying to answer "how do I raise the seat?" has nothing else to go
+    on: an animation in a file is a name and some curves, and a name is not
+    enough to choose between a hundred of them.
+
+    Nothing here is checked against the tracks. It describes the clip, and a
+    description that disagreed with the motion would be the browser's bug to
+    fix, not something to reject a whole conversion over.
+    """
+
+    kind: str = Field("merged", max_length=32)
+    targets: list[str] = Field(default_factory=list, max_length=MAX_TRACKS)
+    labels: list[str] = Field(default_factory=list, max_length=MAX_TRACKS)
+    axis: Literal["", "x", "y", "z"] = ""
+    amount: float = 0.0
+    summary: str = Field("", max_length=MAX_SUMMARY_LEN)
+    tags: list[str] = Field(default_factory=list, max_length=MAX_TAGS)
+
+    @field_validator("amount")
+    @classmethod
+    def _finite(cls, value: float) -> float:
+        number = float(value)
+        return number if math.isfinite(number) else 0.0
+
+    @field_validator("targets", "labels")
+    @classmethod
+    def _clean_names(cls, value: list[str]) -> list[str]:
+        return [str(name)[:MAX_NAME_LEN] for name in value]
+
+    @field_validator("tags")
+    @classmethod
+    def _clean_tags(cls, value: list[str]) -> list[str]:
+        kept: dict[str, None] = {}
+        for tag in value:
+            word = " ".join(str(tag).split())[:MAX_TAG_LEN].lower()
+            if word:
+                kept.setdefault(word, None)
+        return list(kept)
+
+
 class Clip(BaseModel):
     """One named animation: how long it runs, and the tracks that play in it."""
 
     name: str = Field("Animation", max_length=MAX_NAME_LEN)
     duration: float = Field(3.0, gt=0.0, le=MAX_CLIP_SECONDS)
     tracks: list[Track] = Field(default_factory=list)
+    # Absent on a clip keyed by hand: nobody has said what it is for.
+    meta: ClipMeta | None = None
 
     @field_validator("name")
     @classmethod
@@ -264,7 +322,11 @@ class Options(BaseModel):
         if len(value) > MAX_CLIPS:
             raise ValueError(f"at most {MAX_CLIPS} animations per job")
         # A clip in which nothing moves has nothing to write.
-        return [clip for clip in value if clip.tracks]
+        kept = [clip for clip in value if clip.tracks]
+        total = sum(len(t.keys) for clip in kept for t in clip.tracks)
+        if total > MAX_TOTAL_KEYS:
+            raise ValueError(f"at most {MAX_TOTAL_KEYS} keyframes across all animations")
+        return kept
 
     @field_validator("part_details")
     @classmethod
