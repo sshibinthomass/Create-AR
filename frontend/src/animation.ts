@@ -11,7 +11,7 @@
  * The backend bakes the same function frame by frame into the file, so the two
  * have to agree exactly: `sample_pose` in blender_job.py mirrors `poseAt` here.
  */
-import { Euler, Quaternion, Vector3, type Object3D } from 'three'
+import type { Object3D } from 'three'
 import type { Clip, Ease, Keyframe, Pose, Track } from './api'
 
 export const REST: Pose = { move: [0, 0, 0], rotate: [0, 0, 0], scale: [1, 1, 1] }
@@ -141,13 +141,6 @@ export function removeKey(clip: Clip, target: string, time: number): Clip {
   }
 }
 
-/** Slide one key to another moment, taking the place of whatever was there. */
-export function moveKey(clip: Clip, target: string, from: number, to: number): Clip {
-  const key = keyAt(clip, target, from)
-  if (!key || Math.abs(from - to) < EPS) return clip
-  return setKey(removeKey(clip, target, from), target, to, key)
-}
-
 /** Times are twentieths of a second; carrying float dust past that helps nobody. */
 const round = (t: number): number => Math.round(t * 1000) / 1000
 
@@ -232,66 +225,6 @@ export function reverseClip(clip: Clip): Clip {
   }
 }
 
-/**
- * Several clips played as one: all at once, or one after another.
- *
- * This is how an answer gets shown. A question like "how do I raise the seat?"
- * is answered by a handful of clips -- find the lever, turn it, lift the seat --
- * and what the person asking wants is one thing to press play on, not three.
- * `sequence` lays them end to end for a set of steps; `together` overlays them
- * for motions that happen at the same time.
- *
- * A part keeps whatever pose the clip before it left it in, because `poseAt`
- * holds a track after its last key. That is what a sequence of steps means: a
- * cover taken off in step one is still off in step three.
- *
- * Where two clips key the same part at the same instant, the earlier one in the
- * list wins -- the opposite of `setKey`'s own rule, and deliberately. In a
- * sequence the contested instant is always the boundary between two steps: the
- * pose the first step arrives at, and the rest pose the second sets out from.
- * Letting the second win would cancel the first step outright, so that a clip
- * that raised a seat travels towards a key that has been replaced by rest and
- * never moves at all.
- */
-export function mergeClips(
-  clips: readonly Clip[], name: string, mode: 'sequence' | 'together' = 'sequence',
-): Clip {
-  let out = newClip(name, DEFAULT_DURATION)
-  let offset = 0
-  const pivots = new Map<string, [number, number, number]>()
-  for (const c of clips) {
-    for (const t of c.tracks) {
-      if (t.pivot) pivots.set(t.target, t.pivot)
-      for (const k of t.keys) {
-        const when = round(offset + k.time)
-        if (keyAt(out, t.target, when)) continue
-        out = setKey(out, t.target, when, pose(k), k.ease)
-      }
-    }
-    if (mode === 'sequence') offset += c.duration
-  }
-  const duration = mode === 'sequence'
-    ? offset
-    : clips.reduce((longest, c) => Math.max(longest, c.duration), 0)
-  return {
-    ...out,
-    // Merging nothing still has to give back a playable clip: a length of zero
-    // is not a clip, and the exporter refuses one.
-    duration: duration || DEFAULT_DURATION,
-    tracks: out.tracks.map((t) => (pivots.has(t.target)
-      ? { ...t, pivot: pivots.get(t.target) } : t)),
-    meta: {
-      kind: 'merged',
-      targets: [...new Set(clips.flatMap((c) => c.meta?.targets ?? []))],
-      labels: [...new Set(clips.flatMap((c) => c.meta?.labels ?? []))],
-      axis: '',
-      amount: clips.length,
-      summary: clips.map((c) => c.meta?.summary ?? c.name).join(' '),
-      tags: [...new Set(clips.flatMap((c) => c.meta?.tags ?? []))],
-    },
-  }
-}
-
 /** A copy of a clip, under a new name and with an id of its own. */
 export function copyClip(clip: Clip, name: string): Clip {
   counter += 1
@@ -321,15 +254,127 @@ export function pruneClips(clips: Clip[], keep: (target: string) => boolean): Cl
     .filter((c) => c.tracks.length > 0)
 }
 
-/* ---------- composing poses ---------- */
-
-const quat = (rotate: readonly number[]): Quaternion =>
-  new Quaternion().setFromEuler(new Euler(rotate[0] * DEG, rotate[1] * DEG, rotate[2] * DEG, 'XYZ'))
-
-const degrees = (q: Quaternion): [number, number, number] => {
-  const e = new Euler().setFromQuaternion(q, 'XYZ')
-  return [e.x / DEG, e.y / DEG, e.z / DEG]
+/**
+ * Key one channel -- or one axis of it -- back to rest at this moment, on every
+ * target.
+ *
+ * A keyframe rather than a deletion: the poses either side of it are someone's
+ * work, and "back to nothing here" is a pose like any other. The pose panel and
+ * the readout over the viewer are two ways of pressing the same undo, so they
+ * share the fold; pausing the clock stays with whichever one is on screen.
+ */
+export function resetAt(
+  clip: Clip, targets: readonly string[], time: number,
+  key: keyof Pose, axis: number | null,
+): Clip {
+  return targets.reduce((next, t) => {
+    const p = poseAt(track(next, t), time)
+    return setKey(next, t, time, { ...p, [key]: restAxes(p, key, axis) })
+  }, clip)
 }
+
+/**
+ * What a set of poses agrees this axis is, or null where they differ.
+ *
+ * Null rather than a neutral value, because the two callers want different
+ * things from a disagreement: the readout prints an em dash, the sliders fall
+ * back to `REST`. Only the caller knows which.
+ */
+export const agreed = (
+  poses: readonly Pose[], key: keyof Pose, axis: number,
+): number | null =>
+  poses.length && poses.every((p) => p[key][axis] === poses[0][key][axis])
+    ? poses[0][key][axis]
+    : null
+
+/* ---------- quaternion arithmetic ---------- */
+
+/**
+ * The four operations below are ported from three's own source rather than
+ * imported from it, and the reason is the bundle rather than taste.
+ *
+ * three's ESM is a single module file. This module is reached eagerly -- the
+ * timeline, the pose panels and the readout all import it -- while the viewer
+ * and the offscreen renderer reach three lazily. Importing even one class here
+ * therefore drags the whole of three, `WebGLRenderer` included, into the first
+ * load: 460 kB for four functions' worth of arithmetic. Isolated, those classes
+ * tree-shake to 24 kB; mixed eager and lazy, rollup has to put the entire module
+ * in the entry chunk because the lazy chunks need the rest of it.
+ *
+ * They are ports, not reimplementations: same formulas, same branch points, same
+ * clamp. They have to be, because the viewer composes poses with the real three
+ * classes and the two must agree exactly or a gizmo drag reads back as a
+ * different pose than it wrote. `test-quat.mjs` checks them against three over
+ * random and degenerate input, and is the thing that fails if this drifts.
+ */
+type Quat = readonly [x: number, y: number, z: number, w: number]
+type Vec3 = readonly [number, number, number]
+
+/** Euler angles in degrees, XYZ order, as a quaternion. `Quaternion.setFromEuler`. */
+function quat(rotate: readonly number[]): Quat {
+  const c1 = Math.cos(rotate[0] * DEG / 2), s1 = Math.sin(rotate[0] * DEG / 2)
+  const c2 = Math.cos(rotate[1] * DEG / 2), s2 = Math.sin(rotate[1] * DEG / 2)
+  const c3 = Math.cos(rotate[2] * DEG / 2), s3 = Math.sin(rotate[2] * DEG / 2)
+  return [
+    s1 * c2 * c3 + c1 * s2 * s3,
+    c1 * s2 * c3 - s1 * c2 * s3,
+    c1 * c2 * s3 + s1 * s2 * c3,
+    c1 * c2 * c3 - s1 * s2 * s3,
+  ]
+}
+
+/** `a` then `b`, the way `Quaternion.multiply` composes them. */
+function mul(a: Quat, b: Quat): Quat {
+  return [
+    a[0] * b[3] + a[3] * b[0] + a[1] * b[2] - a[2] * b[1],
+    a[1] * b[3] + a[3] * b[1] + a[2] * b[0] - a[0] * b[2],
+    a[2] * b[3] + a[3] * b[2] + a[0] * b[1] - a[1] * b[0],
+    a[3] * b[3] - a[0] * b[0] - a[1] * b[1] - a[2] * b[2],
+  ]
+}
+
+/** The turn undone. `Quaternion.invert` is the conjugate; ours are always unit. */
+const conj = (q: Quat): Quat => [-q[0], -q[1], -q[2], q[3]]
+
+/**
+ * Back to XYZ Euler degrees. `Euler.setFromQuaternion`, which goes via a
+ * rotation matrix -- so the matrix elements it reads are built inline here, and
+ * only the six that the XYZ branch actually looks at.
+ */
+function degrees(q: Quat): [number, number, number] {
+  const [x, y, z, w] = q
+  const x2 = x + x, y2 = y + y, z2 = z + z
+  const xx = x * x2, xy = x * y2, xz = x * z2
+  const yy = y * y2, yz = y * z2, zz = z * z2
+  const wx = w * x2, wy = w * y2, wz = w * z2
+
+  const m11 = 1 - (yy + zz), m12 = xy - wz, m13 = xz + wy
+  const m22 = 1 - (xx + zz), m23 = yz - wx
+  const m32 = yz + wx, m33 = 1 - (xx + yy)
+
+  const ey = Math.asin(Math.max(-1, Math.min(1, m13)))
+  // Past this the matrix has lost a degree of freedom and the two remaining
+  // angles are no longer separable; three pins Z and takes X from the other
+  // pair, and so must this or a drag through the pole reads back differently.
+  const locked = Math.abs(m13) >= 0.9999999
+  const ex = locked ? Math.atan2(m32, m22) : Math.atan2(-m23, m33)
+  const ez = locked ? 0 : Math.atan2(-m12, m11)
+  return [ex / DEG, ey / DEG, ez / DEG]
+}
+
+/** `v` turned by `q`. `Vector3.applyQuaternion`; `q` is assumed unit. */
+export function rotateVec(q: Quat, v: Vec3): [number, number, number] {
+  const tx = 2 * (q[1] * v[2] - q[2] * v[1])
+  const ty = 2 * (q[2] * v[0] - q[0] * v[2])
+  const tz = 2 * (q[0] * v[1] - q[1] * v[0])
+  return [
+    v[0] + q[3] * tx + q[1] * tz - q[2] * ty,
+    v[1] + q[3] * ty + q[2] * tx - q[0] * tz,
+    v[2] + q[3] * tz + q[0] * ty - q[1] * tx,
+  ]
+}
+
+/* ---------- composing poses ---------- */
 
 /**
  * Lay an animated pose over a node already sitting in its edited pose.
@@ -342,7 +387,8 @@ export function applyPose(node: Object3D, p: Pose): void {
   node.position.x += p.move[0]
   node.position.y += p.move[1]
   node.position.z += p.move[2]
-  node.quaternion.multiply(quat(p.rotate))
+  const { x, y, z, w } = node.quaternion
+  node.quaternion.set(...mul([x, y, z, w], quat(p.rotate)))
   node.scale.x *= p.scale[0]
   node.scale.y *= p.scale[1]
   node.scale.z *= p.scale[2]
@@ -356,7 +402,7 @@ export function applyPose(node: Object3D, p: Pose): void {
  * keyframe should hold.
  */
 export function splitPose(combined: Pose, edit: Pose): Pose {
-  const spin = quat(edit.rotate).invert().multiply(quat(combined.rotate))
+  const spin = mul(conj(quat(edit.rotate)), quat(combined.rotate))
   return {
     move: [combined.move[0] - edit.move[0], combined.move[1] - edit.move[1], combined.move[2] - edit.move[2]],
     rotate: degrees(spin),
@@ -380,24 +426,24 @@ export function splitPose(combined: Pose, edit: Pose): Pose {
  */
 export function poseAbout(node: Object3D, pivot: readonly number[], p: Pose): void {
   const q = quat(p.rotate)
-  const swung = new Vector3(pivot[0] * p.scale[0], pivot[1] * p.scale[1], pivot[2] * p.scale[2])
-    .applyQuaternion(q)
+  const swung = rotateVec(q,
+    [pivot[0] * p.scale[0], pivot[1] * p.scale[1], pivot[2] * p.scale[2]])
   node.position.set(
-    pivot[0] + p.move[0] - swung.x,
-    pivot[1] + p.move[1] - swung.y,
-    pivot[2] + p.move[2] - swung.z,
+    pivot[0] + p.move[0] - swung[0],
+    pivot[1] + p.move[1] - swung[1],
+    pivot[2] + p.move[2] - swung[2],
   )
-  node.quaternion.copy(q)
+  node.quaternion.set(...q)
   node.scale.set(p.scale[0], p.scale[1], p.scale[2])
 }
 
 /** The inverse of `poseAbout`: the pose about the pivot that a node transform means. */
 export function unpivot(read: Pose, pivot: readonly number[]): Pose {
   const q = quat(read.rotate)
-  const swung = new Vector3(pivot[0] * read.scale[0], pivot[1] * read.scale[1], pivot[2] * read.scale[2])
-    .applyQuaternion(q)
+  const swung = rotateVec(q,
+    [pivot[0] * read.scale[0], pivot[1] * read.scale[1], pivot[2] * read.scale[2]])
   return {
-    move: [read.move[0] - pivot[0] + swung.x, read.move[1] - pivot[1] + swung.y, read.move[2] - pivot[2] + swung.z],
+    move: [read.move[0] - pivot[0] + swung[0], read.move[1] - pivot[1] + swung[1], read.move[2] - pivot[2] + swung[2]],
     rotate: read.rotate,
     scale: read.scale,
   }

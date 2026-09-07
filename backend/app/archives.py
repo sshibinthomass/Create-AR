@@ -90,13 +90,6 @@ def sniff(path: Path) -> str | None:
     return None
 
 
-def is_archive(path: Path) -> bool:
-    try:
-        return sniff(path) is not None
-    except ArchiveError:
-        return True  # recognised container we cannot open; caller reports it
-
-
 # --- member iteration --------------------------------------------------------
 
 @dataclass

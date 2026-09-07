@@ -15,14 +15,20 @@ generated animations.
   returns `{ clips, parts }`. Every clip it makes carries a `ClipMeta`.
 - **`frontend/src/api.ts`** — `ClipMeta` is `{ kind, targets, labels, axis, amount,
   summary, tags }`, optional on `Clip` as `meta`. `kind` is one of `spin | hinge |
-  unscrew | slide | raise | detach | highlight | turntable | explode | merged`.
+  unscrew | slide | raise | detach | highlight | turntable | explode`.
   `summary` is a sentence; `tags` are the words a question would use
   (`height`, `remove`, `adjust`, …). **This is the retrieval surface. It exists
   for exactly this task.**
-- **`frontend/src/animation.ts`** — `mergeClips(clips, name, 'sequence' | 'together')`
-  already assembles several clips into one playable clip and writes a `merged`
-  meta. `'sequence'` for steps, `'together'` for simultaneous motion. Read its
-  doc comment: at a contested instant the *earlier* clip wins, deliberately.
+- **`frontend/src/animation.ts`** — `setKey`, `keyAt`, `newClip`, `poseAt`: the
+  primitives a clip is built from. There is **no** merge helper; this task has to
+  write one. It once existed, unused, and was deleted rather than left to rot —
+  build it when you need it, against the shape the answer actually wants.
+  Two things it must get right, learned the first time round: at a contested
+  instant the *earlier* clip has to win (in a sequence that instant is always the
+  boundary between two steps — the pose step one arrives at, and the rest pose
+  step two sets out from, so letting the second win cancels the first outright),
+  and a part keeps whatever pose the clip before it left it in, which `poseAt`
+  gives you free by holding a track after its last key.
 - **`frontend/src/views/AnalysisView.tsx`** — holds `clips`, `renames`, `details`
   in state, and `player` / `Timeline` / `AnimGenerator`. The answer's clip is
   added to `clips` and selected like any other.
@@ -76,9 +82,11 @@ show "nothing matched" without a request at all.
 
 ### Then
 
-Browser: `mergeClips(picked.map(i => sent[i]), question, mode)` → push onto
-`clips`, select it, `player.play()`. Show `answer` above it and the steps as a
-list, each row naming the clip it came from.
+Browser: merge `picked.map(i => sent[i])` into one clip named after the
+question — laid end to end for steps, overlaid for simultaneous motion — then
+push it onto `clips`, select it, `player.play()`. Show `answer` above it and the
+steps as a list, each row naming the clip it came from. A clip assembled this way
+wants a `ClipMeta` of its own; add whatever `kind` fits when you write it.
 
 ## Constraints
 

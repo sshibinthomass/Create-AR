@@ -32,7 +32,7 @@ import {
   WHOLE, type Clip, type ClipMeta, type Ease, type Keyframe, type MotionKind,
   type PartDetails, type Pose, type Track,
 } from './api'
-import { newClip, REST } from './animation'
+import { newClip, REST, rotateVec } from './animation'
 
 /* ---------- how far, and for how long ---------- */
 
@@ -106,22 +106,6 @@ function extremes(v: Vec): { long: Axis; thin: Axis; mid: Axis } {
   return { long: order[0], mid: order[1], thin: order[2] }
 }
 
-/** `v` turned by the quaternion `q`. */
-function spun(q: Quat, v: Vec): [number, number, number] {
-  const [x, y, z, w] = q
-  const cx = y * v[2] - z * v[1]
-  const cy = z * v[0] - x * v[2]
-  const cz = x * v[1] - y * v[0]
-  const dx = y * cz - z * cy
-  const dy = z * cx - x * cz
-  const dz = x * cy - y * cx
-  return [
-    v[0] + 2 * (w * cx + dx),
-    v[1] + 2 * (w * cy + dy),
-    v[2] + 2 * (w * cz + dz),
-  ]
-}
-
 /**
  * Which of the part's *own* axes points most nearly along `dir`, and whether it
  * points with it or against it.
@@ -138,7 +122,7 @@ function ownAxis(spin: Quat, dir: Vec): { axis: Axis; sign: number } {
   let sign = 1
   for (const i of [0, 1, 2] as Axis[]) {
     const e: Vec = [i === 0 ? 1 : 0, i === 1 ? 1 : 0, i === 2 ? 1 : 0]
-    const world = spun(spin, e)
+    const world = rotateVec(spin, e)
     const dot = world[0] * dir[0] + world[1] * dir[1] + world[2] * dir[2]
     if (Math.abs(dot) > best) {
       best = Math.abs(dot)
@@ -183,7 +167,7 @@ export interface Shape {
  * Structurally what the viewer's `PartSizes` already is, spelled out here so
  * that the rules do not have to import a React component to know what a box is.
  */
-export interface Geometry {
+interface Geometry {
   boxes: readonly Vec[]
   centres: readonly Vec[]
   spins: readonly Quat[]
@@ -639,7 +623,6 @@ const GROUP: Record<MotionKind, keyof Wanted | null> = {
   slide: 'travels', raise: 'travels', detach: 'travels',
   highlight: 'highlights',
   turntable: 'whole', explode: 'whole',
-  merged: null,
 }
 
 /**
@@ -691,7 +674,7 @@ function place(s: Shape): string {
   return said.join(' ')
 }
 
-export interface GenResult {
+interface GenResult {
   clips: Clip[]
   /** How many parts the run actually looked at. */
   parts: number

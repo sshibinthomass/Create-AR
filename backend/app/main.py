@@ -206,7 +206,7 @@ class ClipMeta(BaseModel):
     fix, not something to reject a whole conversion over.
     """
 
-    kind: str = Field("merged", max_length=32)
+    kind: str = Field("", max_length=32)
     targets: list[str] = Field(default_factory=list, max_length=MAX_TRACKS)
     labels: list[str] = Field(default_factory=list, max_length=MAX_TRACKS)
     axis: Literal["", "x", "y", "z"] = ""

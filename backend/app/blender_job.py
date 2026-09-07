@@ -19,6 +19,21 @@ def emit(kind, **payload):
     print(MARKER + kind + " " + json.dumps(payload), flush=True)
 
 
+def warn_missing(names, what):
+    """Say which named parts no object answered to, and what did not happen.
+
+    Reported rather than passed over: a model exported without the change the
+    user asked for is the one outcome they cannot tell apart from a bug. Only
+    the first few are listed -- a rename against the wrong file misses every
+    part, and a warning listing five hundred of them says nothing extra.
+    """
+    if not names:
+        return
+    more = " (and " + str(len(names) - 5) + " more)" if len(names) > 5 else ""
+    emit("warn", message="No part named "
+         + ", ".join("'" + n + "'" for n in names[:5]) + more + " -- " + what)
+
+
 # --- format tables -----------------------------------------------------------
 # Parameter names verified against Blender 5.2 operator RNA; see docs/FORMATS.md.
 
@@ -180,16 +195,18 @@ def world_bounds():
     return lo, hi
 
 
-def scene_stats(evaluated=True):
-    """Count what the scene holds.
+def mesh_counts(evaluated=True):
+    """``(name, vertices, triangles)`` per mesh object.
 
     ``evaluated`` must match what the exporter is about to do. Simplify, the
     triangle budget, merge-by-distance and triangulate are all *modifiers*, so
     with "apply modifiers" off none of them reach the file -- and counting the
     evaluated mesh would report a reduction the download does not have.
+
+    A list rather than a generator: each evaluated mesh has to be released after
+    it is counted, and a consumer that stopped early would leave them behind.
     """
-    verts = 0
-    tris = 0
+    out = []
     dg = bpy.context.evaluated_depsgraph_get() if evaluated else None
     for ob in bpy.data.objects:
         if ob.type != "MESH":
@@ -204,10 +221,18 @@ def scene_stats(evaluated=True):
                 continue
         else:
             ev, me = None, ob.data
-        verts += len(me.vertices)
-        tris += sum(max(len(p.vertices) - 2, 0) for p in me.polygons)
+        out.append((ob.name, len(me.vertices),
+                    sum(max(len(p.vertices) - 2, 0) for p in me.polygons)))
         if ev is not None:
             ev.to_mesh_clear()
+    return out
+
+
+def scene_stats(evaluated=True):
+    """Count what the scene holds."""
+    counts = mesh_counts(evaluated)
+    verts = sum(v for _, v, _ in counts)
+    tris = sum(t for _, _, t in counts)
     lo, hi = world_bounds()
     return {
         "objects": len(bpy.data.objects),
@@ -933,21 +958,7 @@ BUDGET_FLOOR = 64
 
 def triangle_counts():
     """Evaluated triangle count per mesh object, so modifiers already set count."""
-    counts = {}
-    dg = bpy.context.evaluated_depsgraph_get()
-    for ob in bpy.data.objects:
-        if ob.type != "MESH":
-            continue
-        try:
-            ev = ob.evaluated_get(dg)
-            me = ev.to_mesh()
-        except Exception:
-            continue
-        if me is None:
-            continue
-        counts[ob.name] = sum(max(len(p.vertices) - 2, 0) for p in me.polygons)
-        ev.to_mesh_clear()
-    return counts
+    return {name: tris for name, _, tris in mesh_counts()}
 
 
 def apply_tri_budget(budget):
@@ -1220,11 +1231,7 @@ def main():
     dropped, gone = apply_removals(o.get("remove") or [])
     if dropped:
         emit("info", message="Removed " + str(dropped) + " object(s)")
-    if gone:
-        emit("warn", message="No part named " + ", ".join(
-            "'" + n + "'" for n in gone[:5]) + (
-            " (and " + str(len(gone) - 5) + " more)" if len(gone) > 5 else "")
-            + " -- those parts were not removed")
+    warn_missing(gone, "those parts were not removed")
     if not bpy.data.objects:
         emit("error", message="every part was removed -- nothing left to export")
         sys.exit(3)
@@ -1232,11 +1239,7 @@ def main():
     edited, styled, missing = apply_edits(o.get("edits") or {})
     if edited:
         emit("info", message="Edited " + str(edited) + " part(s)")
-    if missing:
-        emit("warn", message="No part named " + ", ".join(
-            "'" + n + "'" for n in missing[:5]) + (
-            " (and " + str(len(missing) - 5) + " more)" if len(missing) > 5 else "")
-            + " -- those edits were not applied")
+    warn_missing(missing, "those edits were not applied")
     # OBJ carries materials as a running state, so an unstyled part written
     # after a styled one would inherit its colour. Only worth the extra
     # materials when something actually was styled.
@@ -1266,11 +1269,7 @@ def main():
     if keyed:
         emit("info", message="Keyed " + str(keyed) + " part-track(s) across "
              + str(len(o.get("clips") or [])) + " clip(s)")
-    if unmoved:
-        emit("warn", message="No part named " + ", ".join(
-            "'" + n + "'" for n in unmoved[:5]) + (
-            " (and " + str(len(unmoved) - 5) + " more)" if len(unmoved) > 5 else "")
-            + " -- those parts were not animated")
+    warn_missing(unmoved, "those parts were not animated")
     emit("progress", pct=52, step="Reducing")
     if not applies_modifiers and reductions:
         # Every one of these is a modifier, and the exporters are being told

@@ -1,6 +1,8 @@
 import { useSyncExternalStore } from 'react'
 import { WHOLE, type Clip, type Pose } from '../api'
-import { isPosed, keyAt, poseAt, removeKey, restAxes, seconds, setKey, track } from '../animation'
+import {
+  agreed, isPosed, keyAt, poseAt, removeKey, resetAt, REST, seconds, setKey, track,
+} from '../animation'
 import type { Player } from '../player'
 import { TransformSliders } from './PartEditor'
 
@@ -33,9 +35,9 @@ export default function AnimEditor({ clip, targets, label, extent, player, onCli
   // What the targets have in common, with a neutral value on any axis they
   // disagree about -- the panel is showing the group, not any one part.
   const shared: Pose = poses.length === 1 ? poses[0] : {
-    move: axis(poses, 'move', 0),
-    rotate: axis(poses, 'rotate', 0),
-    scale: axis(poses, 'scale', 1),
+    move: channel(poses, 'move'),
+    rotate: channel(poses, 'rotate'),
+    scale: channel(poses, 'scale'),
   }
 
   /** A slider moved: key that one axis, at this moment, on every target. */
@@ -59,11 +61,7 @@ export default function AnimEditor({ clip, targets, label, extent, player, onCli
    */
   const onReset = (key: keyof Pose, axis: number | null) => {
     player.pause()
-    let next = clip
-    targets.forEach((t, j) => {
-      next = setKey(next, t, time, { ...poses[j], [key]: restAxes(poses[j], key, axis) })
-    })
-    onClip(next)
+    onClip(resetAt(clip, targets, time, key, axis))
   }
 
   /** Key the pose the targets are in right now, blended or not: a hold. */
@@ -139,7 +137,6 @@ export default function AnimEditor({ clip, targets, label, extent, player, onCli
   )
 }
 
-const axis = (poses: Pose[], key: keyof Pose, neutral: number): [number, number, number] =>
-  [0, 1, 2].map((i) => (
-    poses.length && poses.every((p) => p[key][i] === poses[0][key][i]) ? poses[0][key][i] : neutral
-  )) as [number, number, number]
+/** One channel the targets share, resting on any axis they disagree about. */
+const channel = (poses: Pose[], key: keyof Pose): [number, number, number] =>
+  [0, 1, 2].map((i) => agreed(poses, key, i) ?? REST[key][i]) as [number, number, number]

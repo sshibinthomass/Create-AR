@@ -109,27 +109,37 @@ export default function AnalysisView({
   const agent = useAgent()
   const clearExport = exported.setJob
 
-  // A different model means a different set of parts; nothing carries over.
-  const onParts = useCallback((names: string[], span: number,
-                               centre: [number, number, number], scale: PartSizes) => {
-    setParts(names)
-    setReach(span)
-    setSizes(scale)
-    setPivot(centre)
+  // Everything held about the model that is being replaced. Shared by the three
+  // ways a model goes away: dropped here, sent over from the Convert tab, or
+  // replaced by the viewer reporting a different set of parts.
+  const forget = useCallback(() => {
+    setParts([])
     setRenames({})
     setDetails({})
     setEdits({})
-    agent.setReport(null)
     setRemoved([])
     setSelected([])
     setOpened(null)
     setAnimate(false)
     setClips([])
     setClipId(null)
-    setSubject('parts')
     player.stop()
     clearExport(null)
-  }, [agent.setReport, clearExport, player])
+  }, [player, clearExport])
+
+  // A different model means a different set of parts; nothing carries over.
+  // Everything common to letting a model go is `forget`'s -- the parts land
+  // after it in the same batch, so its `setParts([])` is simply overwritten.
+  const onParts = useCallback((names: string[], span: number,
+                               centre: [number, number, number], scale: PartSizes) => {
+    forget()
+    setParts(names)
+    setReach(span)
+    setSizes(scale)
+    setPivot(centre)
+    setSubject('parts')
+    agent.setReport(null)
+  }, [forget, agent.setReport])
 
   const clip = animate ? clips.find((c) => c.id === clipId) ?? null : null
   const wholeModel = clip !== null && subject === 'model'
@@ -185,12 +195,11 @@ export default function AnalysisView({
    * A run is meant to be thrown away and repeated -- name the parts, generate,
    * see that the names are better, generate again -- so re-running replaces
    * what the last run left and nothing else. A clip is the generator's if it
-   * carries a meta it wrote; one merged out of others is not, because somebody
-   * chose to build it.
+   * carries a meta it wrote; one keyed by hand has none, and is kept.
    */
   const takeGenerated = useCallback((made: Clip[]) => {
     setClips((all) => {
-      const mine = all.filter((c) => !c.meta || c.meta.kind === 'merged')
+      const mine = all.filter((c) => !c.meta)
       setClipId(made[0]?.id ?? mine[0]?.id ?? null)
       return [...mine, ...made]
     })
@@ -199,7 +208,7 @@ export default function AnalysisView({
 
   /** How many of the clips came from the last run, and a new one would replace. */
   const generated = useMemo(
-    () => clips.filter((c) => c.meta && c.meta.kind !== 'merged').length, [clips])
+    () => clips.filter((c) => c.meta).length, [clips])
 
   /** Turning animation on for the first time gives you a clip to start in. */
   const toggleAnimate = useCallback((on: boolean) => {
@@ -503,23 +512,6 @@ export default function AnalysisView({
     ), clip))
   }, [clip, player, pivot, edits, updateClip])
 
-
-  // Everything held about the model that is being replaced. Shared by the two
-  // ways a model arrives: dropped here, or sent over from the Convert tab.
-  const forget = useCallback(() => {
-    setParts([])
-    setRenames({})
-    setDetails({})
-    setEdits({})
-    setRemoved([])
-    setSelected([])
-    setOpened(null)
-    setAnimate(false)
-    setClips([])
-    setClipId(null)
-    player.stop()
-    exported.setJob(null)
-  }, [player, exported])
 
   // A conversion arriving from the Convert tab opens itself: the user pressed
   // the button that means "take this apart", so making them press another one

@@ -505,16 +505,7 @@ def _name_schema(describe: bool) -> dict:
         "additionalProperties": False,
     }
     if describe:
-        part["properties"]["details"] = {
-            "type": "array",
-            "items": {
-                "type": "object",
-                "properties": {"label": {"type": "string"},
-                               "text": {"type": "string"}},
-                "required": ["label", "text"],
-                "additionalProperties": False,
-            },
-        }
+        part["properties"]["details"] = naming.DETAILS_SCHEMA
         part["required"] = [*part["required"], "details"]
     return {
         "type": "object",
@@ -679,11 +670,8 @@ def _name_batch(session: Session, seen: dict[str, str]) -> list[dict]:
     wanted = set(ids)
     named = []
     for entry in found.get("parts") or []:
-        if not isinstance(entry, dict):
-            continue
-        try:
-            index = int(entry.get("id"))
-        except (TypeError, ValueError):
+        index = naming.entry_id(entry)
+        if index is None:
             continue
         name = " ".join(str(entry.get("name", "")).split())[:MAX_NAME_LEN]
         if index not in wanted or not name:
@@ -701,11 +689,8 @@ def _name_batch(session: Session, seen: dict[str, str]) -> list[dict]:
     again = []
     if session.looks < MAX_LOOKS:
         for entry in found.get("look_again") or []:
-            if not isinstance(entry, dict):
-                continue
-            try:
-                index = int(entry.get("id"))
-            except (TypeError, ValueError):
+            index = naming.entry_id(entry)
+            if index is None:
                 continue
             if index in wanted:
                 again.append({

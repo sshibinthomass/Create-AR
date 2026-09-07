@@ -69,6 +69,37 @@ def _anthropic_image(data: str) -> dict:
             "source": {"type": "base64", "media_type": "image/jpeg", "data": data}}
 
 
+# The description block, shared with the agent's own schema in agent.py. A list
+# of label/text pairs rather than an object keyed by label, because a strict
+# schema cannot describe an object whose keys are not known in advance -- and the
+# whole point of the labels is that the model picks them. Read, never mutated, so
+# both schemas can hold the same one.
+DETAILS_SCHEMA = {
+    "type": "array",
+    "items": {
+        "type": "object",
+        "properties": {"label": {"type": "string"}, "text": {"type": "string"}},
+        "required": ["label", "text"],
+        "additionalProperties": False,
+    },
+}
+
+
+def entry_id(entry: object) -> int | None:
+    """The ``id`` off one entry of a reply, or None if there is no usable one.
+
+    Models return the odd string, float, or nothing at all where an integer was
+    asked for. Three readers -- here and both of the agent's -- have to survive
+    that identically, so the coercion lives in one place.
+    """
+    if not isinstance(entry, dict):
+        return None
+    try:
+        return int(entry["id"])
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
 def reply_schema(describe: bool) -> dict:
     """The shape a reply has to take.
 
@@ -88,16 +119,7 @@ def reply_schema(describe: bool) -> dict:
         "additionalProperties": False,
     }
     if describe:
-        part["properties"]["details"] = {
-            "type": "array",
-            "items": {
-                "type": "object",
-                "properties": {"label": {"type": "string"},
-                               "text": {"type": "string"}},
-                "required": ["label", "text"],
-                "additionalProperties": False,
-            },
-        }
+        part["properties"]["details"] = DETAILS_SCHEMA
         part["required"] = ["id", "name", "details"]
     return {
         "type": "object",
@@ -165,11 +187,8 @@ def _read(reply: str | None, req: NameRequest) -> dict[int, dict]:
     wanted = {p.index for p in req.parts}
     named: dict[int, dict] = {}
     for entry in entries:
-        if not isinstance(entry, dict):
-            continue
-        try:
-            index = int(entry.get("id"))
-        except (TypeError, ValueError):
+        index = entry_id(entry)
+        if index is None:
             continue
         name = _clean(entry.get("name", ""))
         if index in wanted and name:

@@ -1,6 +1,6 @@
 import { Fragment, useSyncExternalStore } from 'react'
 import type { Clip, Pose } from '../api'
-import { poseAt, REST, restAxes, seconds, setKey, track } from '../animation'
+import { agreed, poseAt, REST, resetAt, seconds, track } from '../animation'
 import type { Player } from '../player'
 
 /**
@@ -39,12 +39,6 @@ export function poseFormat(extent: number): Record<keyof Pose, (v: number) => st
     rotate: (v) => `${Math.round(v)}°`,
     scale: (v) => `${v.toFixed(2)}×`,
   }
-}
-
-/** What the marked parts agree this axis is, or null where they differ. */
-function agreed(poses: Pose[], key: keyof Pose, axis: number): number | null {
-  const first = poses[0][key][axis]
-  return poses.every((p) => p[key][axis] === first) ? first : null
 }
 
 export default function TransformReadout({ title, at, poses, extent, onReset }: {
@@ -142,11 +136,7 @@ export function ClipReadout({ clip, targets, title, extent, player, onClip }: {
   const reset = (key: keyof Pose, axis: number | null) => {
     // A pose set by hand is a pose to look at, not one to play past.
     player.pause()
-    let next = clip
-    targets.forEach((t, i) => {
-      next = setKey(next, t, time, { ...poses[i], [key]: restAxes(poses[i], key, axis) })
-    })
-    onClip(next)
+    onClip(resetAt(clip, targets, time, key, axis))
   }
 
   return (

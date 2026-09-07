@@ -21,7 +21,7 @@ const SETTLE_MS = 120
 /** Enough to hold a working set of parts and poses without growing forever. */
 const KEEP = 48
 
-export interface Shot {
+interface Shot {
   /** base64 JPEG, no data: prefix. Null while the first one is being drawn. */
   data: string | null
   failed: boolean

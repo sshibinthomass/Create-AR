@@ -1,4 +1,4 @@
-export interface Format {
+interface Format {
   ext: string
   label: string
   category: 'mesh' | 'cad' | 'scene' | 'archive'
@@ -26,7 +26,7 @@ export interface Health {
   maxUploadBytes: number
 }
 
-export interface Stats {
+interface Stats {
   objects: number
   meshes: number
   materials: number
@@ -85,7 +85,7 @@ export interface PartsDoc {
   animations?: PartsDocAnimation[]
 }
 
-export type JobStatus = 'queued' | 'running' | 'done' | 'error'
+type JobStatus = 'queued' | 'running' | 'done' | 'error'
 
 export interface Job {
   id: string
@@ -169,15 +169,13 @@ export interface Track {
  * They are named for what the movement *is*, not for which channel it uses, so
  * that a reader picking a clip out of a list -- a person or a model answering a
  * question about the product -- is choosing between "take it off" and "swing it
- * open" rather than between two rotations. `merged` is the odd one out: a clip
- * assembled from others rather than generated from a part.
+ * open" rather than between two rotations.
  */
 export type MotionKind =
   | 'spin' | 'hinge' | 'unscrew'
   | 'slide' | 'raise' | 'detach'
   | 'highlight'
   | 'turntable' | 'explode'
-  | 'merged'
 
 /**
  * What a clip *means*, written down beside it.
@@ -200,10 +198,7 @@ export interface ClipMeta {
   labels: string[]
   /** The axis the motion runs along or turns about, in the viewer's Y-up axes. */
   axis: 'x' | 'y' | 'z' | ''
-  /**
-   * Degrees for a turn, model units for a travel, a factor for a scale -- or,
-   * on a `merged` clip, how many clips went into it.
-   */
+  /** Degrees for a turn, model units for a travel, a factor for a scale. */
   amount: number
   /** One sentence saying what the clip does. What a question is matched against. */
   summary: string
@@ -218,7 +213,7 @@ export interface Clip {
   name: string
   duration: number  // seconds
   tracks: Track[]
-  /** Present on generated and merged clips; absent on ones made by hand. */
+  /** Present on generated clips; absent on ones made by hand. */
   meta?: ClipMeta
 }
 
@@ -292,10 +287,10 @@ export type GizmoMode = 'translate' | 'rotate' | 'scale' | null
 export type ReduceMode = 'percent' | 'budget'
 
 /** `auto` keeps each image in the format it was authored in. */
-export type TextureFormat = 'auto' | 'jpeg' | 'webp'
+type TextureFormat = 'auto' | 'jpeg' | 'webp'
 
 /** How meshes are joined together. `material` keeps one mesh per material. */
-export type MergeMode = 'none' | 'material' | 'all'
+type MergeMode = 'none' | 'material' | 'all'
 
 export interface ConvertOptions {
   scale: number
@@ -623,7 +618,7 @@ export interface PartFacts {
   material: string
 }
 
-export type ShotView = 'whole' | 'neighbourhood' | 'isolated' | 'context' | 'scaled'
+type ShotView = 'whole' | 'neighbourhood' | 'isolated' | 'context' | 'scaled'
 
 /** One render the agent has asked for. `key` comes back with the pixels. */
 export interface ShotSpec {
