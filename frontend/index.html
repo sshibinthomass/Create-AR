@@ -4,6 +4,22 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>3D Model Converter</title>
+    <!--
+      A theme someone chose by hand has to be on the element before the first
+      paint. Without this the stylesheet's own default paints first and the app
+      flips it a moment later, which is a flash of the wrong theme on every
+      load. Nobody who has not overridden reaches this: with no stored choice
+      the attribute stays off and the prefers-color-scheme query decides, so
+      the common path needs no script at all.
+    -->
+    <script>
+      try {
+        var held = localStorage.getItem('converter.theme')
+        if (held === 'light' || held === 'dark') {
+          document.documentElement.setAttribute('data-theme', held)
+        }
+      } catch (e) { /* private window: the media query decides instead */ }
+    </script>
   </head>
   <body>
     <div id="root"></div>

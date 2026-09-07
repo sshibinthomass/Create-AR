@@ -15,6 +15,7 @@ import { applyPose, poseAbout, poseAt, REST } from '../animation'
 import { poseEdited, restyleNode } from '../partEdit'
 import { fileNames, NO_SIZES, partNodes, type NameSource, type PartSizes } from '../partGraph'
 import type { Player } from '../player'
+import { cssColor, useThemeValue } from '../theme'
 
 /**
  * Image-based lighting built from in-scene emissive panels.
@@ -365,14 +366,17 @@ function SelectionBox({ parts, separation, pose, wrapper, player }: {
   wrapper: RefObject<Group | null>
   player: Player | null
 }) {
+  // Rebuilt when the theme moves: the accent is a different blue in each, and
+  // the box is drawn once and then only repositioned.
+  const theme = useThemeValue()
   const helper = useMemo(() => {
-    const h = new Box3Helper(new Box3(), new Color('#5b8cff'))
+    const h = new Box3Helper(new Box3(), new Color(cssColor('--accent')))
     h.renderOrder = 3
     const material = h.material as LineBasicMaterial
     material.depthTest = false
     material.transparent = true
     return h
-  }, [])
+  }, [theme])
 
   const stale = useRef(true)
   useEffect(() => { stale.current = true }, [parts, separation, pose])
@@ -938,6 +942,15 @@ export default function ModelViewer({
   const [parts, setParts] = useState(0)
   const [gizmo, setGizmo] = useState<GizmoMode>(null)
   const [full, setFull] = useState(false)
+  // WebGL paints its own ground, so the tokens are read back out rather than
+  // inherited. Re-read whenever the theme moves.
+  const theme = useThemeValue()
+  const ground = useMemo(() => ({
+    bg: cssColor('--scene-bg'),
+    cell: cssColor('--grid-cell'),
+    section: cssColor('--grid-section'),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }), [theme])
   // Only ever asked to reset, so the concrete controls type is not worth
   // importing -- drei takes it from three-stdlib, not from @types/three.
   const view = useRef<View | null>(null)
@@ -1039,7 +1052,7 @@ export default function ModelViewer({
             onPointerMissed={() => onSelect?.(null, false)}
           >
             <ViewBridge into={view} />
-            <color attach="background" args={['#10131c']} />
+            <color attach="background" args={[ground.bg]} />
             <ambientLight intensity={0.35} />
             <directionalLight position={[4, 6, 4]} intensity={1.5} />
             <directionalLight position={[-5, 2, -3]} intensity={0.5} />
@@ -1071,8 +1084,8 @@ export default function ModelViewer({
               args={[10, 10]}
               cellSize={0.1}
               sectionSize={0.5}
-              cellColor="#242a3a"
-              sectionColor="#2f3850"
+              cellColor={ground.cell}
+              sectionColor={ground.section}
               fadeDistance={12}
               fadeStrength={1.2}
               infiniteGrid

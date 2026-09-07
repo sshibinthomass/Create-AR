@@ -7,6 +7,7 @@ import ConvertView from './views/ConvertView'
 import AnalysisView from './views/AnalysisView'
 import SettingsView from './views/SettingsView'
 import { navigate, RouteLink, useRoute, type Route } from './router'
+import { useTheme, type Choice } from './theme'
 
 // Settings is a view like the others, but it is not a step in the work, so
 // it is reached from the gear in the corner rather than from the tab bar.
@@ -15,12 +16,47 @@ const TABS: { id: Route; label: string }[] = [
   { id: 'analysis', label: 'Analysis' },
 ]
 
+// Round-trips back to 'system', so handing the decision back to the machine is
+// as reachable as taking it away -- an override you cannot undo is a trap.
+const NEXT: Record<Choice, Choice> = { system: 'light', light: 'dark', dark: 'system' }
+const SAYS: Record<Choice, string> = {
+  system: 'Matching your system theme',
+  light: 'Light theme',
+  dark: 'Dark theme',
+}
+
+/** Monitor, sun, moon: what the button is set to, not what it will do next. */
+function ThemeIcon({ choice }: { choice: Choice }) {
+  const common = {
+    width: 16, height: 16, viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor',
+    strokeWidth: 1.7, strokeLinecap: 'round' as const, strokeLinejoin: 'round' as const,
+  }
+  if (choice === 'light') {
+    return (
+      <svg {...common}>
+        <circle cx="12" cy="12" r="4" />
+        <path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4" />
+      </svg>
+    )
+  }
+  if (choice === 'dark') {
+    return <svg {...common}><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z" /></svg>
+  }
+  return (
+    <svg {...common}>
+      <rect x="2.5" y="4" width="19" height="12.5" rx="2" />
+      <path d="M8.5 20.5h7M12 16.5v4" />
+    </svg>
+  )
+}
+
 export default function App() {
   const [health, setHealth] = useState<Health | null>(null)
   const [caps, setCaps] = useState<Capabilities | null>(null)
   const [settings, setSettings] = useState<NamerSettings | null>(null)
   const [bootError, setBootError] = useState<string | null>(null)
   const tab = useRoute()
+  const { choice, choose } = useTheme()
   // A conversion sent over from the Convert tab, cleared once Analysis has
   // picked it up so that switching tabs later does not re-run it.
   const [handoff, setHandoff] = useState<Handoff | null>(null)
@@ -37,13 +73,15 @@ export default function App() {
   return (
     <div className="app">
       <header className="topbar">
-        <div className="brand">
-          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinejoin="round">
+        {/* The page's one h1: the outline started at h2 without it, and every
+            view's own heading hangs off this. */}
+        <h1 className="brand">
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinejoin="round" aria-hidden="true">
             <path d="M12 2.5 21 7.5v9L12 21.5 3 16.5v-9z" />
             <path d="M3 7.5 12 12.5l9-5M12 12.5v9" />
           </svg>
           3D Model Converter <small>Blender-powered</small>
-        </div>
+        </h1>
 
         <nav className="tabs">
           {TABS.map((t) => (
@@ -63,6 +101,15 @@ export default function App() {
         {health?.cadSupport && (
           <span className="badge ok"><i className="dot" />STEP / IGES ready</span>
         )}
+        <button
+          className="gear"
+          onClick={() => choose(NEXT[choice])}
+          title={`${SAYS[choice]} — click for ${SAYS[NEXT[choice]].toLowerCase()}`}
+          aria-label={`Theme: ${SAYS[choice].toLowerCase()}. Change it.`}
+        >
+          <ThemeIcon choice={choice} />
+        </button>
+
         <RouteLink
           to={tab === 'settings' ? 'convert' : 'settings'}
           className={`gear${tab === 'settings' ? ' sel' : ''}`}
