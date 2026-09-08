@@ -8,8 +8,14 @@ import shutil
 import subprocess
 from pathlib import Path
 
+from dotenv import load_dotenv
+
 BACKEND_DIR = Path(__file__).resolve().parent.parent
 REPO_DIR = BACKEND_DIR.parent
+
+# Picks up LANGFUSE_* (and anything else an operator wants out of source
+# control) regardless of where the process was started from.
+load_dotenv(REPO_DIR / ".env")
 
 # Where uploads and results live. Overridable so deployments can point at a volume.
 DATA_DIR = Path(os.environ.get("CONVERTER_DATA_DIR", BACKEND_DIR / "data")).resolve()

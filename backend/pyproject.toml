@@ -22,6 +22,10 @@ dependencies = [
     # are installed so switching provider needs no reinstall.
     "openai>=1.40",
     "anthropic>=0.40",
+    # Traces every naming/agent call to Langfuse. See app/naming.py:ask.
+    "langfuse>=3.0",
+    # Loads LANGFUSE_* out of the repo-root .env; see app/config.py.
+    "python-dotenv>=1.0",
 ]
 
 [project.optional-dependencies]
