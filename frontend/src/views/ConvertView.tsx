@@ -194,7 +194,9 @@ export default function ConvertView({ health, caps, active, onAnalyse }: {
 
       {/* ---------------- right: the result ---------------- */}
       <div className="col">
-        <section className="card">
+        {/* viewer-card, not a plain card: the stage carries no panel of its own,
+            so that the model reads as held in the field rather than boxed. */}
+        <section className="card viewer-card">
           <Suspense fallback={<div className="viewer"><div className="viewer-empty">Loading viewer…</div></div>}>
             <ModelViewer
               key={preview ?? 'empty'}

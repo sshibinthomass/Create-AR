@@ -7,7 +7,8 @@
     "dev": "vite",
     "build": "tsc -b && vite build",
     "preview": "vite preview",
-    "test:quat": "node test-quat.mjs"
+    "test:quat": "node test-quat.mjs",
+    "test:contrast": "node test-contrast.mjs"
   },
   "dependencies": {
     "@react-three/drei": "^9.114.0",

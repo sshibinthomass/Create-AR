@@ -1,152 +1,195 @@
-/* Dark is the base: it is what this tool was designed in, and what it falls
-   back to if a token below is ever missed.
-   Light is applied twice further down -- once for a machine set to light that
-   has not been overridden, once for an explicit override. Duplicated on purpose:
-   it keeps the correct theme painting on first frame with no script, which is
-   what stops the page flashing the wrong one on load. */
-:root {
-  --bg: #0b0d12;
-  --panel: #12151d;
-  --panel-2: #171b25;
-  --line: #232838;
-  --line-soft: #1c2130;
-  /* Borders that answer a hover. Brighter than --line here, darker in light. */
-  --line-strong: #38405a;
-  --text: #e6e9f0;
-  --muted: #8b93a7;
-  /* Lifted from #626b80, which measured 3.2-3.6:1 against the three grounds it
-     lands on and left the format sublabels, the drop hint, the provider notes
-     and every disabled button below AA. This is the one value in the original
-     dark theme that changed; everything else is exactly as it was. */
-  --dim: #7a8399;
-  --accent: #5b8cff;
-  --accent-soft: rgba(91, 140, 255, 0.14);
-  --ok: #3ecf8e;
-  --warn: #f0b429;
-  --err: #f2555a;
+/* ===========================================================================
+   Palette — the Arvenilo design system, and the light theme it does not ship.
 
-  /* Carried as raw channels rather than colours so every rule keeps the exact
-     alpha it already had: panels that float over the model are seen through. */
-  --float-rgb: 18, 21, 29;      /* menus, toolbars, readouts */
-  --tag-rgb: 11, 13, 18;        /* small chips sitting on the 3D scene */
+   The DS is dark-only, and says so outright: its README warns that putting it
+   on a light background makes the near-white type disappear. This app has a
+   light theme regardless, so the light half of what follows is authored here.
+
+   It is built by re-pointing the DS's own tokens rather than by restating the
+   app's. That reads oddly at first -- a light block that sets
+   --color-spatial-void to a pale grey -- so the reasoning, once:
+
+     - Every rule in this file speaks the app's short token names (--bg,
+       --panel, --accent). Those are declared once, in the dark :root below,
+       as var() chains onto DS tokens.
+     - A theme therefore only has to move the DS tokens underneath, and all
+       1,500 lines of app CSS follow. Nothing is declared twice, so the two
+       themes cannot drift apart.
+     - The same re-pointing makes the *vendored DS stylesheet* theme-aware,
+       which it was never written to be. .eyebrow hardcodes
+       var(--color-signal-mint); on a light ground that is a 1.4:1 mint on
+       near-white. Moving the token fixes .eyebrow, .button-link, .status-chip
+       and every other DS class at once, instead of chasing each one.
+
+   So the DS names are read as roles, not as colours: --color-spatial-void is
+   "the ground", --color-reality-mist is "the foreground", --color-signal-mint
+   is "the accent". The names describe their dark-mode instance; the roles are
+   what survive the swap. The depth ladder keeps its direction in both themes --
+   raised is always the lighter step, and always the one you can act on.
+
+   Four values are authored rather than taken from the DS, because the DS has
+   no light-mode equivalent to take: --dim in both themes, and the light
+   accent, gold and stage. Each carries its measured ratio. They are checked,
+   not trusted -- `node test-contrast.mjs` asserts every foreground against
+   every ground it lands on, in all three blocks. Change one by eye and it
+   fails.
+   =========================================================================== */
+
+/* The design system is vendored whole and imported into its own cascade layer.
+   The layer is what lets the rules below stay unlayered and win without a
+   single !important or specificity fight -- unlayered styles beat every
+   layered one, whatever the selectors look like.
+
+   What this app actually takes from that sheet is the tokens, the three font
+   stacks, the global :focus-visible ring, and the html/body base. Its ~113
+   component classes are nearly all marketing-page sections (.about-hero,
+   .contact-form-section, .legal-hero) that a conversion tool has no use for.
+
+   ponytail: that is roughly 12 kB gzipped of CSS this app never selects. It
+   stays whole deliberately -- it is vendored third-party code, and hand-pruning
+   it would guarantee drift the next time the DS is re-synced, for a saving that
+   does not show up in a paint. If it ever does matter, the fix is a build-time
+   purge step, not an edited copy. */
+@import "./ds/fonts/fonts.css";
+@import "./ds/arvenilo.css" layer(ds);
+
+/* Dark is the DS exactly as it ships, so this block maps rather than invents.
+   It is also the base the two light blocks below are applied on top of, which
+   is why they are so much shorter than it. */
+:root {
+  --bg: var(--color-spatial-void);
+  --panel: var(--color-spatial-surface);
+  --panel-2: var(--color-spatial-surface-raised);
+  --line: var(--color-line);
+  --line-soft: rgba(29, 69, 74, 0.45);
+  /* Borders that answer a hover. The DS tints this one with the accent, so a
+     hovered edge and a selected edge are visibly the same family. */
+  --line-strong: var(--color-line-strong);
+  --text: var(--color-reality-mist);
+  --muted: var(--color-mist-slate);
+  /* Authored. --color-context-slate is the DS's third text step, but it is
+     built for the void and measures 1.9:1 on --color-spatial-surface-raised,
+     where this lands. This is the same hue carried up the lightness ladder
+     until it clears AA on all three grounds -- 4.75:1 on the raised step,
+     which is the tightest. It carries the drop hint, the format sublabels and
+     the part numbers: small text, and the first thing to go illegible. */
+  --dim: #83a2a5;
+  --accent: var(--color-signal-mint);
+  --accent-soft: color-mix(in srgb, var(--color-signal-mint) 14%, transparent);
+  /* Mint reads as "current" throughout -- the selected format, the active
+     part, a healthy backend -- so "ready" is the accent rather than a second
+     green competing with it. */
+  --ok: var(--color-signal-mint);
+  --warn: var(--color-anchor-gold);
+  --err: var(--color-error-light);
+
+  /* Raw channels rather than colours, so every rule keeps the exact alpha it
+     already had: panels that float over the model are seen through. */
+  --float-rgb: 13, 42, 46;      /* menus, toolbars, readouts */
+  --tag-rgb: 2, 10, 12;         /* small chips sitting on the 3D scene */
   --shadow-rgb: 0, 0, 0;
 
-  /* The model's own ground, and the log's. Both sit behind content that has to
-     stay readable, so they flip with the theme rather than staying dark. */
-  --stage-near: #1b2030;
-  --stage-far: #0c0e14;
-  --log-bg: #080a0e;
+  --stage-near: var(--color-spatial-surface);
+  --stage-far: var(--color-spatial-void);
+  /* The log is a well cut into its card, so it shows the page ground through
+     rather than a colour of its own. */
+  --log-bg: var(--color-spatial-void);
 
-  /* Text laid on a filled colour, where --text would vanish. */
-  --on-ok: #04140c;
-  --err-text: #ff9296;
-  --warn-text: #e6d3a3;
-  /* A selected keyframe, and the hairline that separates it from its track. */
-  --key-on: #ffffff;
-  --key-edge: #0b0d12;
+  --on-ok: var(--color-spatial-void);
+  --err-text: var(--color-error-light);
+  --warn-text: var(--color-anchor-gold);
+  --key-on: var(--color-interface-white);
+  --key-edge: var(--color-spatial-void);
 
-  /* The 3D scene draws itself, not through CSS, so the viewer reads these back
-     out at runtime. Only the ground the model stands on changes with the theme;
-     the lighting rig does not, so a part is shaded the same either way and two
-     people comparing materials are looking at the same thing. */
-  --scene-bg: #10131c;
-  --grid-cell: #242a3a;
-  --grid-section: #2f3850;
+  /* The 3D scene draws itself rather than through CSS, so the viewer reads
+     these back out at runtime. Only the ground the model stands on changes
+     with the theme; the lighting rig does not, so a part is shaded the same
+     either way and two people comparing materials see the same thing. */
+  --grid-cell: var(--color-spatial-surface-raised);
+  --grid-section: var(--color-border-dark);
 
-  --radius: 12px;
+  --radius: var(--radius-card);
   color-scheme: dark;
 }
-
 
 /* A machine set to light, where nobody has said otherwise. Guarded so an
    explicit dark override still wins over the system preference. */
 @media (prefers-color-scheme: light) {
   :root:not([data-theme="dark"]) {
-  --bg: #e9edf4;
-  --panel: #ffffff;
-  --panel-2: #f3f6fb;
-  --line: #ccd4e2;
-  --line-soft: #e2e8f2;
-  --line-strong: #a9b4c8;
-  --text: #10141c;
-  --muted: #4f5871;
-  /* Dark enough to clear 4.5:1 on every ground it lands on -- it carries the
-     hints, the part numbers and the stat labels, which are small and are the
-     first thing to go illegible. */
-  --dim: #626b7e;
-  --accent: #2559d6;
-  --accent-soft: rgba(37, 89, 214, 0.10);
-  --ok: #0f7a4c;
-  --warn: #8a5a00;
-  --err: #c62630;
+  --color-spatial-void: #eaf3f2;
+  --color-spatial-ink: #dfeceb;
+  --color-spatial-surface: #f4fbfa;
+  --color-spatial-surface-raised: #ffffff;
+  --color-reality-mist: #081d21;
+  --color-mist-slate: #4d6265;
+  /* Authored. The DS mint is #5eead4 and measures 1.4:1 on this ground, so it
+     cannot carry text here. Same hue (172), taken down the lightness ladder
+     until it clears AA: 4.67:1 on the ground, 5.27:1 on white. Both themes
+     therefore share an accent hue and differ only in how far down it sits. */
+  --color-signal-mint: #15796c;
+  --color-anchor-gold: #8e640b;     /* authored: 4.68:1 on the ground */
+  --color-error-light: #b83e4b;     /* the DS's own --color-error-dark */
+  --color-line: #c9dada;            /* the DS's own --color-border-light */
+  --color-line-strong: rgba(21, 121, 108, 0.38);
+
+  --dim: #567176;                   /* authored: 4.63:1 on the ground */
+  --line-soft: #e2edec;
+  --accent-soft: var(--color-mint-wash);
+  --on-ok: var(--color-interface-white);
+  --key-on: var(--color-reality-mist);
 
   --float-rgb: 255, 255, 255;
   --tag-rgb: 255, 255, 255;
-  --shadow-rgb: 20, 28, 45;
+  --shadow-rgb: 8, 29, 33;
 
   /* Deeper than the panels around it, on purpose. A model with no materials of
      its own renders near-white, and on a white ground it disappears; every 3D
      tool's light theme puts the viewport a few steps down for the same reason.
      Dark does not need this -- the model already separates there. */
-  --stage-near: #e6ebf3;
-  --stage-far: #c8d1e0;
-  --log-bg: #f1f4f9;
+  --stage-near: #cfe2df;
+  --stage-far: #a8c4bf;
+  --log-bg: #e2eeec;
 
-  --on-ok: #ffffff;
-  --err-text: #a3131c;
-  --warn-text: #6f4700;
-  --key-on: #10141c;
-  --key-edge: #ffffff;
-
-  --scene-bg: #d6dde9;
-  --grid-cell: #c2cbdc;
-  --grid-section: #a7b3c9;
+  --grid-cell: #b8cfcb;
+  --grid-section: #8fada8;
 
   color-scheme: light;
   }
 }
 
-/* Light asked for outright, whatever the machine is set to. */
+/* Light asked for outright, whatever the machine is set to. Identical to the
+   block above by necessity rather than by choice: one is a media query and one
+   is an attribute, and CSS cannot share declarations between the two. The
+   contrast check reads both, so a fix applied to only one of them fails. */
 :root[data-theme="light"] {
-  --bg: #e9edf4;
-  --panel: #ffffff;
-  --panel-2: #f3f6fb;
-  --line: #ccd4e2;
-  --line-soft: #e2e8f2;
-  --line-strong: #a9b4c8;
-  --text: #10141c;
-  --muted: #4f5871;
-  /* Dark enough to clear 4.5:1 on every ground it lands on -- it carries the
-     hints, the part numbers and the stat labels, which are small and are the
-     first thing to go illegible. */
-  --dim: #626b7e;
-  --accent: #2559d6;
-  --accent-soft: rgba(37, 89, 214, 0.10);
-  --ok: #0f7a4c;
-  --warn: #8a5a00;
-  --err: #c62630;
+  --color-spatial-void: #eaf3f2;
+  --color-spatial-ink: #dfeceb;
+  --color-spatial-surface: #f4fbfa;
+  --color-spatial-surface-raised: #ffffff;
+  --color-reality-mist: #081d21;
+  --color-mist-slate: #4d6265;
+  --color-signal-mint: #15796c;
+  --color-anchor-gold: #8e640b;
+  --color-error-light: #b83e4b;
+  --color-line: #c9dada;
+  --color-line-strong: rgba(21, 121, 108, 0.38);
+
+  --dim: #567176;
+  --line-soft: #e2edec;
+  --accent-soft: var(--color-mint-wash);
+  --on-ok: var(--color-interface-white);
+  --key-on: var(--color-reality-mist);
 
   --float-rgb: 255, 255, 255;
   --tag-rgb: 255, 255, 255;
-  --shadow-rgb: 20, 28, 45;
+  --shadow-rgb: 8, 29, 33;
 
-  /* Deeper than the panels around it, on purpose. A model with no materials of
-     its own renders near-white, and on a white ground it disappears; every 3D
-     tool's light theme puts the viewport a few steps down for the same reason.
-     Dark does not need this -- the model already separates there. */
-  --stage-near: #e6ebf3;
-  --stage-far: #c8d1e0;
-  --log-bg: #f1f4f9;
+  --stage-near: #cfe2df;
+  --stage-far: #a8c4bf;
+  --log-bg: #e2eeec;
 
-  --on-ok: #ffffff;
-  --err-text: #a3131c;
-  --warn-text: #6f4700;
-  --key-on: #10141c;
-  --key-edge: #ffffff;
-
-  --scene-bg: #d6dde9;
-  --grid-cell: #c2cbdc;
-  --grid-section: #a7b3c9;
+  --grid-cell: #b8cfcb;
+  --grid-section: #8fada8;
 
   color-scheme: light;
 }
@@ -159,7 +202,7 @@ body {
   margin: 0;
   background: var(--bg);
   color: var(--text);
-  font: 14px/1.5 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+  font: 14px/1.5 var(--font-text);
   -webkit-font-smoothing: antialiased;
 }
 
@@ -168,13 +211,26 @@ button:disabled { cursor: not-allowed; }
 
 /* ---------- shell ---------- */
 
-.app { min-height: 100%; display: flex; flex-direction: column; }
+/* The point field, behind everything and inert. Fixed rather than scrolled:
+   the field is the space the app is held in, not part of the document. */
+.point-field-layer {
+  position: fixed; inset: 0; z-index: 0;
+  width: 100%; height: 100%;
+  pointer-events: none;
+}
+/* Raised out of the field's stacking context. Without this the canvas, being
+   positioned, would paint over the unpositioned content above it. */
+.app { position: relative; z-index: 1; min-height: 100%; display: flex; flex-direction: column; }
 
 .topbar {
   display: flex; align-items: center; gap: 16px;
   padding: 14px 24px;
   border-bottom: 1px solid var(--line);
-  background: var(--panel);
+  /* A veil rather than a slab: the field stays faintly visible through the
+     header, which is what keeps the chrome reading as floating over a depth
+     instead of capping it. */
+  background: rgba(var(--float-rgb), 0.72);
+  backdrop-filter: blur(14px) saturate(140%);
   position: sticky; top: 0; z-index: 10;
   /* Wraps rather than overflows: the gear is the only way into Settings, and a
      row that cannot fit would carry it off the right edge of the page. */
@@ -183,10 +239,17 @@ button:disabled { cursor: not-allowed; }
 
 .brand {
   display: flex; align-items: center; gap: 10px;
-  font-size: inherit; font-weight: 650; letter-spacing: -0.01em; margin: 0;
+  font-family: var(--font-display);
+  font-size: 15px; font-weight: 600; letter-spacing: -0.015em; margin: 0;
 }
 .brand svg { color: var(--accent); }
-.brand small { color: var(--dim); font-weight: 400; margin-left: 2px; }
+/* What actually does the work, set in the face this app uses for anything a
+   machine reported. */
+.brand small {
+  font-family: var(--font-utility);
+  font-size: 10px; font-weight: 400; letter-spacing: 0.04em;
+  color: var(--dim); margin-left: 2px;
+}
 
 .topbar-spacer { flex: 1; }
 
@@ -206,13 +269,13 @@ button:disabled { cursor: not-allowed; }
   .topbar { gap: 10px 12px; padding: 12px 16px; }
   .topbar-spacer { flex: none; margin-left: auto; }
   .brand small { display: none; }
-  .gear { order: 1; margin-left: auto; }
+  .topbar-actions { order: 1; margin-left: auto; }
 }
 
 .badge .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--dim); flex: none; }
-.badge.ok .dot { background: var(--ok); box-shadow: 0 0 8px rgba(62, 207, 142, 0.6); }
+.badge.ok .dot { background: var(--ok); box-shadow: 0 0 8px color-mix(in srgb, var(--ok) 60%, transparent); }
 .badge.bad .dot { background: var(--err); }
-.badge.bad { color: var(--err); border-color: rgba(242, 85, 90, 0.35); }
+.badge.bad { color: var(--err); border-color: color-mix(in srgb, var(--err) 35%, transparent); }
 
 .tabs { display: flex; gap: 4px; padding: 3px; border-radius: 9px; background: var(--panel-2); border: 1px solid var(--line); }
 .tab {
@@ -225,6 +288,45 @@ button:disabled { cursor: not-allowed; }
 
 .view { flex: 1; display: flex; flex-direction: column; min-width: 0; }
 .view[hidden] { display: none; }
+
+/* ---------- home ---------- */
+
+/* Home is built almost entirely out of the design system's own band, heading,
+   button and chip classes, so what follows is only the handful of sizes and
+   gaps the DS leaves to the caller. If a rule here is doing more than that,
+   the DS probably already has a class for it. */
+/* The hero takes no band, on purpose. Every DS band is a veil with a backdrop
+   blur -- .light-section blurs by 7px -- and a 7px blur erases points that are
+   under two pixels across, so a hero inside one shows no field at all. Open
+   ground here, veils from the second band down: the field is fully visible
+   behind the headline and progressively covered as the page turns into text,
+   which is also where legibility starts to matter more than depth. */
+.home-hero { padding-block: var(--section-space); }
+
+.home-title {
+  font-size: var(--text-display-lg);
+  max-width: 24ch;
+  margin: var(--space-5) 0;
+}
+.home-cta { margin-top: var(--space-7); }
+.home-cta--center { margin-inline: auto; justify-content: center; }
+.home-chips {
+  display: flex; flex-wrap: wrap; gap: var(--space-3);
+  margin-top: var(--space-6);
+}
+.home-step-title { font-size: var(--text-heading-3); margin-bottom: var(--space-3); }
+
+/* Four steps in one row, once there is room for it. */
+@media (min-width: 900px) {
+  .home-workflow { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+}
+
+/* An extension and which way it travels, on one line. */
+.home-formats .feature-list li {
+  display: flex; align-items: baseline; justify-content: space-between;
+  gap: var(--space-3);
+}
+.home-ext { font-family: var(--font-utility); font-weight: 500; }
 
 .layout {
   flex: 1;
@@ -288,11 +390,55 @@ button:disabled { cursor: not-allowed; }
 
 .col { display: flex; flex-direction: column; gap: 16px; min-width: 0; }
 
+/* Solid, not a veil. The point field only runs on Home, so on the tool views
+   there is nothing behind a panel to see through -- a translucent fill and a
+   backdrop blur would cost compositing to reveal the flat page colour. */
 .card {
   background: var(--panel);
   border: 1px solid var(--line);
   border-radius: var(--radius);
   overflow: hidden;
+}
+
+/* The stage still has no panel and no edge -- a pool of light on the page,
+   fading out before it reaches anything, so the model is the only thing with a
+   silhouette. The pool is CSS, not 3D: it survives the field being removed and
+   is what keeps the viewer from reading as a boxed thumbnail. */
+.viewer-card {
+  background: none;
+  border: none;
+  backdrop-filter: none;
+  overflow: visible;
+}
+.viewer-card .viewer {
+  border-bottom: none;
+}
+.viewer-card .viewer-stage {
+  background: radial-gradient(
+    ellipse 72% 62% at 50% 44%,
+    var(--stage-near) 0%,
+    color-mix(in srgb, var(--stage-far) 62%, transparent) 52%,
+    transparent 76%
+  );
+  border-radius: var(--radius-stage);
+}
+/* With nothing on it, the stage is just field. The pool of light comes up when
+   a specimen arrives, which is the one bit of state this layout animates by
+   simply being true -- and it keeps an empty Convert tab from showing a large
+   lit ellipse with nothing in it, which in the light theme reads as a smudge.
+   Matches the failed-render case too: both are stages with nothing to light. */
+.viewer-card .viewer-stage:has(> .viewer-empty) {
+  background: none;
+}
+
+/* The instrumentation under the stage keeps a ground of its own, so a readout
+   never floats unsupported next to the model. */
+.viewer-card > .card-body,
+.viewer-card > .stats {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  margin-top: 12px;
 }
 .card-head {
   display: flex; align-items: center; flex-wrap: wrap; gap: 8px 10px;
@@ -416,7 +562,7 @@ input[type='range'] { width: 110px; accent-color: var(--accent); }
 
 .go {
   width: 100%; padding: 11px; border-radius: 9px; border: none;
-  background: var(--accent); color: #fff; font-weight: 600;
+  background: var(--accent); color: var(--on-ok); font-weight: 600;
   transition: filter .12s;
 }
 .go:hover:not(:disabled) { filter: brightness(1.1); }
@@ -424,7 +570,7 @@ input[type='range'] { width: 110px; accent-color: var(--accent); }
 
 .error-box {
   padding: 11px 13px; border-radius: 9px; font-size: 13px;
-  background: rgba(242, 85, 90, .1); border: 1px solid rgba(242, 85, 90, .3); color: var(--err-text);
+  background: color-mix(in srgb, var(--err) 10%, transparent); border: 1px solid color-mix(in srgb, var(--err) 30%, transparent); color: var(--err-text);
 }
 
 /* ---------- progress ---------- */
@@ -483,7 +629,7 @@ input[type='range'] { width: 110px; accent-color: var(--accent); }
   transition: color .12s, border-color .12s, background .12s;
 }
 .viewer-tool:hover { color: var(--text); border-color: var(--line-strong); }
-.viewer-tool.on { color: var(--accent); border-color: var(--accent); background: rgba(91, 140, 255, .14); }
+.viewer-tool.on { color: var(--accent); border-color: var(--accent); background: color-mix(in srgb, var(--accent) 14%, transparent); }
 
 /* Filling the window: a fixed overlay, so the canvas is never re-created and
    the camera survives the change. Beats the per-tab height rules by coming
@@ -491,6 +637,9 @@ input[type='range'] { width: 110px; accent-color: var(--accent); }
 .viewer.full {
   position: fixed; inset: 0; z-index: 100;
   height: auto; border: none; border-radius: 0;
+  /* The canvas is transparent now, so the ground has to come from here --
+     without it, full screen would show the form panels through the model. */
+  background: var(--bg);
 }
 /* Filling the window, the model takes whatever the dock leaves rather than the
    fixed height it has on the page -- which is the point of filling the window. */
@@ -572,7 +721,7 @@ input[type='range'] { width: 110px; accent-color: var(--accent); }
   color: var(--muted); font-size: 11px; user-select: none;
   transform: translateY(-2px);
 }
-.part-label.on { color: #fff; background: var(--accent); border-color: var(--accent); }
+.part-label.on { color: var(--on-ok); background: var(--accent); border-color: var(--accent); }
 
 /* ---------- part list ---------- */
 
@@ -656,7 +805,7 @@ input[type='range'] { width: 110px; accent-color: var(--accent); }
 
 .warn-box {
   margin-top: 12px; padding: 9px 11px; border-radius: 8px;
-  background: rgba(240, 180, 41, .10); border-left: 2px solid var(--warn);
+  background: color-mix(in srgb, var(--warn) 10%, transparent); border-left: 2px solid var(--warn);
   font-size: 12px; color: var(--warn-text);
 }
 
@@ -883,8 +1032,8 @@ input[type='range'] { width: 110px; accent-color: var(--accent); }
   width: 8px; height: 8px; background: var(--warn);
   transform: rotate(45deg); border-radius: 1px;
 }
-.tl-drop { color: var(--err); border-color: rgba(242, 85, 90, .3); }
-.tl-drop:hover:not(:disabled) { background: rgba(242, 85, 90, .12); color: var(--err); }
+.tl-drop { color: var(--err); border-color: color-mix(in srgb, var(--err) 30%, transparent); }
+.tl-drop:hover:not(:disabled) { background: color-mix(in srgb, var(--err) 12%, transparent); color: var(--err); }
 
 .tl-ease-label { font-size: 11px; color: var(--dim); white-space: nowrap; }
 .tl-eases { display: flex; background: var(--panel); border: 1px solid var(--line); border-radius: 7px; }
@@ -981,7 +1130,7 @@ input[type='range'] { width: 110px; accent-color: var(--accent); }
 /* The stretch a part is in motion over: at a glance, which step happens when. */
 .tl-span {
   position: absolute; top: 50%; height: 5px; transform: translateY(-50%);
-  background: rgba(240, 180, 41, .22); border-radius: 3px; pointer-events: none;
+  background: color-mix(in srgb, var(--warn) 22%, transparent); border-radius: 3px; pointer-events: none;
 }
 
 /* A key's shape says how the part leaves it, without having to select it:
@@ -1001,7 +1150,7 @@ input[type='range'] { width: 110px; accent-color: var(--accent); }
 .tl-head {
   position: absolute; top: 0; bottom: 0; width: 1px; z-index: 3;
   background: var(--accent); pointer-events: none;
-  box-shadow: 0 0 6px rgba(91, 140, 255, .8);
+  box-shadow: 0 0 6px color-mix(in srgb, var(--accent) 80%, transparent);
 }
 .tl-head::before {
   content: ''; position: absolute; top: 0; left: -5px;
@@ -1052,7 +1201,7 @@ input[type='range'] { width: 110px; accent-color: var(--accent); }
   max-height: 150px; overflow: auto; margin: 0;
   padding: 11px 13px; border-radius: 8px;
   background: var(--log-bg); border: 1px solid var(--line-soft);
-  font: 11px/1.6 ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+  font: 11px/1.6 var(--font-utility);
   color: var(--dim); white-space: pre-wrap; word-break: break-word;
 }
 
@@ -1070,9 +1219,9 @@ input[type='range'] { width: 110px; accent-color: var(--accent); }
 .hist-item .nm { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; }
 .hist-item .arrow { color: var(--dim); font-size: 12px; white-space: nowrap; }
 .pill { font-size: 10px; padding: 2px 7px; border-radius: 999px; font-weight: 600; text-transform: uppercase; letter-spacing: .03em; }
-.pill.done { background: rgba(62, 207, 142, .15); color: var(--ok); }
-.pill.error { background: rgba(242, 85, 90, .15); color: var(--err); }
-.pill.running, .pill.queued { background: rgba(91, 140, 255, .15); color: var(--accent); }
+.pill.done { background: color-mix(in srgb, var(--ok) 15%, transparent); color: var(--ok); }
+.pill.error { background: color-mix(in srgb, var(--err) 15%, transparent); color: var(--err); }
+.pill.running, .pill.queued { background: color-mix(in srgb, var(--accent) 15%, transparent); color: var(--accent); }
 
 .empty { padding: 26px 16px; text-align: center; color: var(--dim); font-size: 13px; }
 
@@ -1084,7 +1233,7 @@ input[type='range'] { width: 110px; accent-color: var(--accent); }
 }
 .entries-head { font-size: 12px; color: var(--muted); margin-bottom: 8px; }
 .entries-head code {
-  font: 11px/1.4 ui-monospace, Menlo, Consolas, monospace;
+  font: 11px/1.4 var(--font-utility);
   background: var(--panel); padding: 1px 5px; border-radius: 4px; color: var(--text);
 }
 .entry {
@@ -1098,7 +1247,7 @@ input[type='range'] { width: 110px; accent-color: var(--accent); }
 .entry:disabled { opacity: .45; }
 .entry-path {
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-  font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 11px;
+  font-family: var(--font-utility); font-size: 11px;
 }
 .entry-go { flex: none; color: var(--accent); font-size: 11px; }
 
@@ -1144,7 +1293,7 @@ input[type='range'] { width: 110px; accent-color: var(--accent); }
 
 .agent-shot {
   display: block; width: 100%; max-height: 220px;
-  object-fit: contain; background: #5a6172;
+  object-fit: contain; background: var(--stage-near);
 }
 .agent-ask-body { display: flex; flex-direction: column; gap: 8px; padding: 12px 14px; }
 
@@ -1162,7 +1311,7 @@ input[type='range'] { width: 110px; accent-color: var(--accent); }
 .agent-report-head { display: flex; align-items: center; justify-content: space-between; }
 .agent-badge {
   font-size: 10px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase;
-  color: var(--ok); background: rgba(62, 207, 142, .12);
+  color: var(--ok); background: color-mix(in srgb, var(--ok) 12%, transparent);
   border-radius: 5px; padding: 3px 7px;
 }
 .agent-subject { margin: 0; font-size: 13px; line-height: 1.5; }
@@ -1176,6 +1325,8 @@ input[type='range'] { width: 110px; accent-color: var(--accent); }
 
 .settings { padding: 20px 24px; }
 .settings > .card { max-width: 620px; margin: 0 auto; }
+
+.topbar-actions { display: flex; align-items: center; gap: 8px; flex: none; }
 
 .gear {
   display: flex; align-items: center; justify-content: center;
@@ -1199,7 +1350,7 @@ input[type='range'] { width: 110px; accent-color: var(--accent); }
 .provider-note { font-size: 11px; color: var(--dim); }
 .provider-key {
   width: 6px; height: 6px; border-radius: 50%; flex: none;
-  background: var(--ok); box-shadow: 0 0 7px rgba(62, 207, 142, .6);
+  background: var(--ok); box-shadow: 0 0 7px color-mix(in srgb, var(--ok) 60%, transparent);
 }
 
 .field { margin-bottom: 12px; }
@@ -1219,7 +1370,7 @@ button.field-side:hover { color: var(--err); }
 
 .prompt {
   display: block; resize: vertical; line-height: 1.55; font-size: 12px;
-  font-family: ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+  font-family: var(--font-utility);
 }
 
 /* An inline "Settings" link inside a note. */
@@ -1240,7 +1391,7 @@ button.field-side:hover { color: var(--err); }
 .wrap-opt.sel { background: var(--accent-soft); color: var(--accent); font-weight: 600; }
 
 .note code {
-  font: 11px/1.4 ui-monospace, Menlo, Consolas, monospace;
+  font: 11px/1.4 var(--font-utility);
   background: var(--panel); padding: 1px 5px; border-radius: 4px; color: var(--text);
 }
 
@@ -1317,10 +1468,10 @@ button.field-side:hover { color: var(--err); }
   position: relative; aspect-ratio: 1; width: 100%;
   display: grid; place-items: center;
   padding: 0; border: none;
-  background: #5a6172;   /* the backdrop the render is shot against */
+  background: var(--stage-near);   /* the backdrop the render is shot against */
 }
 .part-shot-frame img { display: block; width: 100%; height: 100%; }
-.part-shot-wait { font-size: 11px; color: rgba(255, 255, 255, .7); }
+.part-shot-wait { font-size: 11px; color: var(--muted); }
 /* Only on hover: the thumbnail is small enough that a permanent label over it
    would cover the part it is advertising. */
 .part-shot-open {
@@ -1374,11 +1525,11 @@ button.field-side:hover { color: var(--err); }
 .xform-v {
   padding: 1px; border: 1px solid transparent; border-radius: 5px;
   background: none; color: var(--dim);
-  font: 11px/1.35 ui-monospace, Menlo, Consolas, monospace;
+  font: 11px/1.35 var(--font-utility);
   font-variant-numeric: tabular-nums; text-align: center;
   overflow: hidden; text-overflow: ellipsis;
 }
-.xform-v.on { color: var(--text); background: var(--accent-soft); border-color: rgba(91, 140, 255, .3); }
+.xform-v.on { color: var(--text); background: var(--accent-soft); border-color: color-mix(in srgb, var(--accent) 30%, transparent); }
 .xform-v.on:hover { color: var(--accent); border-color: var(--accent); }
 .xform-v:disabled { cursor: default; }
 /* Small enough to sit in a row of figures without becoming the loudest thing
@@ -1434,7 +1585,7 @@ button.field-side:hover { color: var(--err); }
 .pd-of { flex: none; font-size: 11px; color: var(--dim); }
 .pd-gone {
   flex: none; padding: 2px 9px; border-radius: 999px;
-  background: rgba(242, 85, 90, .14); color: var(--err); font-size: 11px;
+  background: color-mix(in srgb, var(--err) 14%, transparent); color: var(--err); font-size: 11px;
 }
 .pd-x {
   flex: none; margin-left: auto; background: none; border: none;
@@ -1459,7 +1610,7 @@ button.field-side:hover { color: var(--err); }
 .pd-shot {
   flex: 1; min-height: 260px;
   display: grid; place-items: center;
-  background: #5a6172;   /* the backdrop the render is shot against */
+  background: var(--stage-near);   /* the backdrop the render is shot against */
   cursor: grab; touch-action: none;   /* the drag turns the camera, not the page */
   overflow: hidden;
 }
@@ -1495,7 +1646,7 @@ button.field-side:hover { color: var(--err); }
 }
 .pd-dirty {
   padding: 1px 8px; border-radius: 999px; letter-spacing: 0; text-transform: none;
-  background: rgba(240, 180, 41, .14); color: var(--warn); font-size: 11px;
+  background: color-mix(in srgb, var(--warn) 14%, transparent); color: var(--warn); font-size: 11px;
 }
 
 .pd-field { display: block; }
@@ -1545,7 +1696,7 @@ button.field-side:hover { color: var(--err); }
   flex: none; background: none; border-radius: 7px;
   padding: 6px 12px; font-size: 12px;
 }
-.pd-delete { border: 1px solid rgba(242, 85, 90, .45); color: var(--err); }
-.pd-delete:hover { background: rgba(242, 85, 90, .12); }
+.pd-delete { border: 1px solid color-mix(in srgb, var(--err) 45%, transparent); color: var(--err); }
+.pd-delete:hover { background: color-mix(in srgb, var(--err) 12%, transparent); }
 .pd-restore { border: 1px solid var(--line); color: var(--muted); }
 .pd-restore:hover { color: var(--accent); border-color: var(--accent); }

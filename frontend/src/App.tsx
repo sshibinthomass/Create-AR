@@ -6,12 +6,15 @@ import {
 import ConvertView from './views/ConvertView'
 import AnalysisView from './views/AnalysisView'
 import SettingsView from './views/SettingsView'
+import HomeView from './views/HomeView'
+import PointField from './components/PointField'
 import { navigate, RouteLink, useRoute, type Route } from './router'
 import { useTheme, type Choice } from './theme'
 
 // Settings is a view like the others, but it is not a step in the work, so
 // it is reached from the gear in the corner rather than from the tab bar.
 const TABS: { id: Route; label: string }[] = [
+  { id: 'home', label: 'Home' },
   { id: 'convert', label: 'Convert' },
   { id: 'analysis', label: 'Analysis' },
 ]
@@ -72,15 +75,22 @@ export default function App() {
 
   return (
     <div className="app">
+      {/* Home only. On the tool views the model is the 3D on screen, and a field
+          drifting behind a part list is something to look past rather than at --
+          so it is not merely hidden there, it is unmounted, and stops drawing. */}
+      {tab === 'home' && <PointField />}
+
       <header className="topbar">
         {/* The page's one h1: the outline started at h2 without it, and every
             view's own heading hangs off this. */}
         <h1 className="brand">
+          {/* An aperture with something passing through it, which is what this
+              stage of the pipeline does to a file. */}
           <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinejoin="round" aria-hidden="true">
-            <path d="M12 2.5 21 7.5v9L12 21.5 3 16.5v-9z" />
-            <path d="M3 7.5 12 12.5l9-5M12 12.5v9" />
+            <path d="M12 2.6 21.4 12 12 21.4 2.6 12z" />
+            <path d="M10.2 8.8 13.4 12l-3.2 3.2" />
           </svg>
-          3D Model Converter <small>Blender-powered</small>
+          Create-AR <small>Blender-powered</small>
         </h1>
 
         <nav className="tabs">
@@ -101,27 +111,32 @@ export default function App() {
         {health?.cadSupport && (
           <span className="badge ok"><i className="dot" />STEP / IGES ready</span>
         )}
-        <button
-          className="gear"
-          onClick={() => choose(NEXT[choice])}
-          title={`${SAYS[choice]} — click for ${SAYS[NEXT[choice]].toLowerCase()}`}
-          aria-label={`Theme: ${SAYS[choice].toLowerCase()}. Change it.`}
-        >
-          <ThemeIcon choice={choice} />
-        </button>
+        {/* Grouped so the two icon buttons wrap as one thing. Loose, they split
+            across rows on a narrow window and leave the header a row taller
+            than it needs to be. */}
+        <div className="topbar-actions">
+          <button
+            className="gear"
+            onClick={() => choose(NEXT[choice])}
+            title={`${SAYS[choice]} — click for ${SAYS[NEXT[choice]].toLowerCase()}`}
+            aria-label={`Theme: ${SAYS[choice].toLowerCase()}. Change it.`}
+          >
+            <ThemeIcon choice={choice} />
+          </button>
 
-        <RouteLink
-          to={tab === 'settings' ? 'convert' : 'settings'}
-          className={`gear${tab === 'settings' ? ' sel' : ''}`}
-          title="Settings"
-          aria-label="Settings"
-        >
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-               strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round">
-            <circle cx="12" cy="12" r="3.2" />
-            <path d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.9-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1A1.7 1.7 0 0 0 8.9 19a1.7 1.7 0 0 0-1.9.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.9 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1A1.7 1.7 0 0 0 5 8.9a1.7 1.7 0 0 0-.3-1.9l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.9.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.9-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.9V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z" />
-          </svg>
-        </RouteLink>
+          <RouteLink
+            to={tab === 'settings' ? 'convert' : 'settings'}
+            className={`gear${tab === 'settings' ? ' sel' : ''}`}
+            title="Settings"
+            aria-label="Settings"
+          >
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                 strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round">
+              <circle cx="12" cy="12" r="3.2" />
+              <path d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.9-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1A1.7 1.7 0 0 0 8.9 19a1.7 1.7 0 0 0-1.9.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.9 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1A1.7 1.7 0 0 0 5 8.9a1.7 1.7 0 0 0-.3-1.9l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.9.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.9-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.9V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z" />
+            </svg>
+          </RouteLink>
+        </div>
       </header>
 
       {bootError && (
@@ -130,8 +145,13 @@ export default function App() {
         </div>
       )}
 
-      {/* Both tabs stay mounted so a running job -- and its result -- survives a
-          switch; the hidden one parks its render loop rather than burning GPU. */}
+      <div className="view" hidden={tab !== 'home'}>
+        <HomeView health={health} caps={caps} />
+      </div>
+
+      {/* Both tool tabs stay mounted so a running job -- and its result --
+          survives a switch; the hidden one parks its render loop rather than
+          burning GPU. */}
       <div className="view" hidden={tab !== 'convert'}>
         <ConvertView
           health={health}

@@ -88,9 +88,12 @@ export default function OptionsPanel({
 
   return (
     <div className="opts">
-      <button className="disclosure" onClick={() => setOpen(!open)}>
+      {/* The +/- says which way this is open; aria-expanded is the same thing
+          said to a screen reader, which otherwise hears only "Conversion
+          options" and cannot tell. */}
+      <button className="disclosure" aria-expanded={open} onClick={() => setOpen(!open)}>
         <span>Conversion options</span>
-        <span>{open ? '−' : '+'}</span>
+        <span aria-hidden="true">{open ? '−' : '+'}</span>
       </button>
 
       {open && (

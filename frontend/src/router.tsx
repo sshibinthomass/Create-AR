@@ -1,17 +1,17 @@
 import { useEffect, useState, type AnchorHTMLAttributes } from 'react'
 
 // Each view has its own address, so a tab can be bookmarked, shared, or opened
-// in a second window. There is no router library: three static paths and a
+// in a second window. There is no router library: four static paths and a
 // history listener are the whole of it.
-export type Route = 'convert' | 'analysis' | 'settings'
+export type Route = 'home' | 'convert' | 'analysis' | 'settings'
 
-const ROUTES: Route[] = ['convert', 'analysis', 'settings']
+const ROUTES: Route[] = ['home', 'convert', 'analysis', 'settings']
 
 export const pathOf = (route: Route) => `/${route}`
 
 function routeOf(pathname: string): Route {
   const seg = pathname.replace(/^\/+|\/+$/g, '')
-  return ROUTES.includes(seg as Route) ? (seg as Route) : 'convert'
+  return ROUTES.includes(seg as Route) ? (seg as Route) : 'home'
 }
 
 // pushState does not fire popstate, so a navigation has to tell the hooks itself.
@@ -30,7 +30,7 @@ export function useRoute(): Route {
   useEffect(() => {
     const sync = () => {
       const next = routeOf(window.location.pathname)
-      // An unrecognised path -- "/" included -- lands on Convert, so rewrite the
+      // An unrecognised path -- "/" included -- lands on Home, so rewrite the
       // address bar to the link that actually reproduces what is on screen.
       if (window.location.pathname !== pathOf(next)) {
         window.history.replaceState(null, '', pathOf(next))

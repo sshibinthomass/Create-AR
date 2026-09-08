@@ -31,7 +31,7 @@ import { cssColor, useThemeValue } from '../theme'
 function LocalEnvironment() {
   return (
     <Environment resolution={128} frames={1}>
-      <color attach="background" args={['#1b1f2a']} />
+      <color attach="background" args={['#12363a']} />
       <Lightformer intensity={3} position={[0, 5, 0]} scale={[12, 12, 1]} rotation-x={Math.PI / 2} />
       <Lightformer intensity={1.1} position={[-6, 1, -2]} scale={[12, 4, 1]} rotation-y={Math.PI / 2} />
       <Lightformer intensity={0.8} position={[6, 0, 2]} scale={[12, 4, 1]} rotation-y={-Math.PI / 2} />
@@ -946,7 +946,6 @@ export default function ModelViewer({
   // inherited. Re-read whenever the theme moves.
   const theme = useThemeValue()
   const ground = useMemo(() => ({
-    bg: cssColor('--scene-bg'),
     cell: cssColor('--grid-cell'),
     section: cssColor('--grid-section'),
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -1048,11 +1047,16 @@ export default function ModelViewer({
           <Canvas
             camera={{ position: CAMERA_START, fov: 45, near: 0.01, far: 100 }}
             dpr={[1, 2]}
+            // Transparent, and deliberately so: the stage's ground is the CSS
+            // light pool and the point field behind it, not a colour the
+            // renderer clears to. An opaque clear would put a hard rectangle
+            // back around the model, which is the one thing this layout exists
+            // to avoid.
+            gl={{ alpha: true }}
             frameloop={active ? 'always' : 'never'}
             onPointerMissed={() => onSelect?.(null, false)}
           >
             <ViewBridge into={view} />
-            <color attach="background" args={[ground.bg]} />
             <ambientLight intensity={0.35} />
             <directionalLight position={[4, 6, 4]} intensity={1.5} />
             <directionalLight position={[-5, 2, -3]} intensity={0.5} />

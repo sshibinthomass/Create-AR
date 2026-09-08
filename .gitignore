@@ -22,3 +22,11 @@ Thumbs.db
 
 # Sample generation only (not a runtime dependency)
 samples/__pycache__/
+
+# Local run configuration (paths, and potentially secrets)
+.env
+.env.*
+
+# Claude Code worktrees live under .claude/ in the main checkout, and are
+# machine-local copies of this repo -- never commit them.
+.claude/worktrees/
