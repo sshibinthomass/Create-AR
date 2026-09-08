@@ -45,6 +45,7 @@ from __future__ import annotations
 import json
 import time
 import uuid
+from collections.abc import Iterable
 
 from pydantic import BaseModel, Field
 
@@ -176,6 +177,10 @@ class StartRequest(BaseModel):
     # which it leaves out -- is the thing that decides, and the saved setting is
     # only where the slider starts.
     min_part_size: float | None = Field(None, ge=0.0, le=25.0)
+    # Parts the user has put back into the run by hand, by index. The floor is
+    # a guess at what is worth a request; this is the user saying the guess got
+    # these ones wrong, so they are analysed however small or degenerate.
+    keep: list[int] = Field(default_factory=list, max_length=4096)
 
 
 class StepRequest(BaseModel):
@@ -336,7 +341,8 @@ class Session:
     """One run. Holds the survey, what has been settled, and what is still open."""
 
     def __init__(self, survey: Survey, settings: Settings,
-                 min_part_size: float | None = None):
+                 min_part_size: float | None = None,
+                 keep: Iterable[int] = ()):
         self.id = uuid.uuid4().hex
         self.touched = time.time()
         self.survey = survey
@@ -358,11 +364,22 @@ class Session:
         # gave them and get no description: not analysed, and so nothing
         # invented about them either. They stay in the part list, because the
         # document's index has to keep pointing at the right part in the file.
+        # Parts the user put back in by hand. An identical set is looked at
+        # once and named together, so keeping any of them keeps the set: the
+        # one that stands for it is what gets looked at, and leaving the rest
+        # out would count parts as left alone that are about to be named.
+        stands_for = {i: first for first, set_ in self.groups.items() for i in set_}
+        self.kept = {member for i in keep if i in self.by_index
+                     for member in self.groups.get(stands_for.get(i, i), [i])}
         self.skipped = {p.index for p in survey.parts
-                        if not p.degenerate and too_small(p, survey, self.floor)}
+                        if p.index not in self.kept
+                        and not p.degenerate and too_small(p, survey, self.floor)}
         # Only one part of each identical set is looked at; the rest inherit.
-        self.queue = [i for i in sorted(self.groups)
-                      if not self.by_index[i].degenerate and i not in self.skipped]
+        # A part with no volume stands in no set, so a kept one is added alone.
+        self.queue = sorted(
+            {i for i in self.groups
+             if not self.by_index[i].degenerate and i not in self.skipped}
+            | {i for i in self.kept if self.by_index[i].degenerate})
         self.named: dict[int, NamedPart] = {}
         self.taken: list[str] = []
 
@@ -889,7 +906,8 @@ def _finish(session: Session) -> StepReply:
 def start(request: StartRequest, settings: Settings) -> StepReply:
     """Open a run and ask for the four views the whole model is identified from."""
     _sweep()
-    session = Session(request.survey, settings, request.min_part_size)
+    session = Session(request.survey, settings, request.min_part_size,
+                      request.keep)
     _sessions[session.id] = session
     session.pending = {
         f"w{yaw}": ShotSpec(key=f"w{yaw}", index=-1, view="whole", yaw=yaw)

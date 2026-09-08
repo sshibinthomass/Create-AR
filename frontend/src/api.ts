@@ -664,11 +664,13 @@ export function startAgent(
   survey: { extents: number[]; base: number[]; parts: PartFacts[] },
   /** Percentage of the model's longest side under which a part is left alone. */
   minPartSize = 0,
+  /** Parts to analyse whatever the floor says about them, by index. */
+  keep: readonly number[] = [],
 ): Promise<AgentStep> {
   return fetch('/api/agent/start', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ survey, min_part_size: minPartSize }),
+    body: JSON.stringify({ survey, min_part_size: minPartSize, keep }),
   }).then(json<AgentStep>)
 }
 

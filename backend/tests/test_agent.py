@@ -285,6 +285,35 @@ def test_the_floor_is_measured_on_the_longest_side_not_the_volume():
     assert agent.too_small(washer, survey, 8.0) is True
 
 
+def test_a_kept_part_is_analysed_however_small_it_is():
+    """The floor is a guess; clicking a part the run left out overrides it."""
+    configure(agent_hitl="off", min_part_size=8.0)
+    first = client.post("/api/agent/start", json={
+        "survey": chair(), "keep": [3]}).json()
+    session = agent.get(first["session"])
+    # 3 is one of four identical castors, and 0 is the one that stands for the
+    # set -- so that is what gets looked at, and 3 inherits its name.
+    assert 0 in session.queue
+    assert not ({0, 1, 2, 3, 4} & session.skipped)
+
+
+def test_a_kept_part_with_no_volume_is_looked_at_after_all():
+    configure(agent_hitl="off", min_part_size=0.0)
+    first = client.post("/api/agent/start", json={
+        "survey": chair(), "keep": [9]}).json()
+    session = agent.get(first["session"])
+    assert session.by_index[9].degenerate
+    assert 9 in session.queue
+
+
+def test_keeping_a_part_the_floor_never_touched_changes_nothing():
+    configure(agent_hitl="off", min_part_size=8.0)
+    plain = client.post("/api/agent/start", json={"survey": chair()}).json()
+    kept = client.post("/api/agent/start", json={
+        "survey": chair(), "keep": [6, 999]}).json()
+    assert agent.get(kept["session"]).queue == agent.get(plain["session"]).queue
+
+
 def test_an_out_of_range_floor_is_rejected():
     configure()
     assert client.post("/api/agent/start", json={

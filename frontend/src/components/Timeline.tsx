@@ -87,6 +87,15 @@ export default function Timeline({
   const [picked, setPicked] = useState<KeyRef[]>([])
   const [height, setHeight] = useState(OPEN_HEIGHT)
   const [shut, setShut] = useState(false)
+
+  // How much of the bottom edge the dock is holding, published so that panels
+  // floating over a filled window can stop where it starts. The grip makes
+  // this a moving number, so it is no good as a constant in the stylesheet.
+  useEffect(() => {
+    const root = document.documentElement
+    root.style.setProperty('--dock-h', shut ? '0px' : `${height}px`)
+    return () => { root.style.removeProperty('--dock-h') }
+  }, [height, shut])
   const scrubbing = useRef(false)
   // Where the drag began and what it is carrying, so every move is measured
   // from the grab rather than accumulated -- which would drift on a fast drag.

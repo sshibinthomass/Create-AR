@@ -76,6 +76,8 @@ export function useAgent() {
     parts: readonly string[],
     /** Percentage of the model's longest side under which a part is left alone. */
     minPartSize: number,
+    /** Parts to analyse whatever the floor says about them, by index. */
+    keep: readonly number[],
     onNamed: (names: Record<string, string>, details: Record<string, PartDetails>) => void,
   ) => {
     setError(null)
@@ -122,7 +124,7 @@ export function useAgent() {
       if (studio.names.length !== parts.length) {
         throw new Error('The model changed while it was being measured.')
       }
-      let reply: AgentStep = await startAgent(studio.survey(), minPartSize)
+      let reply: AgentStep = await startAgent(studio.survey(), minPartSize, keep)
       session.current = reply.session
 
       while (!reply.finished && !stopped.current) {

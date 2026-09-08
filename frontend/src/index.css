@@ -346,6 +346,10 @@ button:disabled { cursor: not-allowed; }
 /* The model being loaded spans the top; the parts list and the viewer share
    the room underneath, which is where the editing happens. */
 .analysis {
+  /* How wide the panels are once they are a rail over a filled window: never
+     so narrow that the parts list is squashed, never more than a share of the
+     model. Read by the rail and by its handle, which has to stand beside it. */
+  --rail: clamp(280px, 40vw, 400px);
   flex: 1;
   display: grid;
   grid-template-columns: minmax(340px, 440px) 1fr;
@@ -389,6 +393,65 @@ button:disabled { cursor: not-allowed; }
 }
 
 .col { display: flex; flex-direction: column; gap: 16px; min-width: 0; }
+
+/* Filling the window used to leave the parts list, the export and the
+   animation card underneath a fixed overlay -- on screen in the markup and
+   invisible in fact. Filling the window carries them along instead, as a rail
+   over the left edge that folds away when the model wants the whole window.
+   The cards keep their place in the grid and only change how they are laid
+   out, so nothing is remounted on the way in or out: the list keeps its scroll
+   and a half-typed name is still half-typed. */
+/* Hung below the tool row rather than beside it: the row grows leftwards to
+   fit its buttons, and on a narrow window a rail from the top edge would sit
+   over "Exit full screen" -- the one button you cannot afford to cover. */
+.col.rail {
+  position: fixed; z-index: 101; top: 56px; left: 14px;
+  /* The timeline holds the bottom edge and can be dragged taller, so the rail
+     stops where the dock starts rather than at the window edge. */
+  bottom: calc(var(--dock-h, 0px) + 14px);
+  width: var(--rail);
+  overflow-y: auto; overscroll-behavior: contain;
+  padding-right: 4px;  /* room for the scrollbar, off the cards' corners */
+  transition: left .18s ease, opacity .18s ease;
+}
+/* Folded with `left`, not a transform: a transformed ancestor is what a fixed
+   descendant positions against, and the animation card below is fixed. */
+.col.rail.shut { left: calc(-1 * var(--rail) - 20px); opacity: 0; }
+
+/* The animation card leaves the rail for the right edge, under the tool row.
+   It is the tallest panel there is, and on the left it lies over the timeline
+   it is driving. Folds on its own, because it is open exactly when you are
+   animating and in the way the rest of the time. */
+.col.rail > .anim {
+  position: fixed; top: 56px; right: 14px; width: var(--rail);
+  /* Capped, not stretched: with animation off this card is a header and a
+     switch, and pinning its bottom edge as well would hang a panel of empty
+     panel over the model and over the separation controls under it. */
+  max-height: calc(100vh - 70px - var(--dock-h, 0px));
+  overflow-y: auto; overscroll-behavior: contain;
+  transition: right .18s ease, opacity .18s ease;
+}
+.col.rail.anim-shut > .anim { right: calc(-1 * var(--rail) - 20px); opacity: 0; }
+
+/* And the separation panel gets out from under it, the way it already gets out
+   from in front of the model when the window is filled. */
+.analysis.anim-rail .viewer.full .viewer-bottom { align-items: center; }
+
+.rail-handle {
+  position: fixed; z-index: 102; top: 56px; left: calc(var(--rail) + 26px);
+  display: flex; align-items: center; gap: 6px;
+  background: var(--panel); border: 1px solid var(--line); color: var(--muted);
+  border-radius: 8px; padding: 6px 10px; font-size: 11px;
+  letter-spacing: .1em; text-transform: uppercase;
+  transition: left .18s ease;
+}
+.rail-handle:not(.open) { left: 14px; }
+.rail-handle:hover { color: var(--text); border-color: var(--line-strong); }
+
+/* Below the other handle, not beside it: with both rails open on a narrow
+   window the two would land on the same strip of middle. */
+.anim-handle { flex-direction: row-reverse; top: 98px; left: auto; right: calc(var(--rail) + 26px); }
+.anim-handle:not(.open) { left: auto; right: 14px; }
 
 /* Solid, not a veil. The point field only runs on Home, so on the tool views
    there is nothing behind a panel to see through -- a translucent fill and a
@@ -749,6 +812,15 @@ input[type='range'] { width: 110px; accent-color: var(--accent); }
   padding: 2px 5px; border-radius: 6px; font-size: 14px; line-height: 1;
 }
 .part-undo:hover { color: var(--accent); background: var(--panel-2); }
+
+/* Always visible, unlike the open and drop buttons: on a row the analysis is
+   leaving out it is the only way back in, and hiding it until hover would
+   hide the fact that there is a way back in at all. */
+.part-keep {
+  flex: none; background: none; border: 1px solid var(--line); color: var(--dim);
+  padding: 1px 6px; border-radius: 6px; font-size: 13px; line-height: 1.2;
+}
+.part-keep:hover { color: var(--accent); border-color: var(--accent); }
 
 .part-open, .part-drop {
   flex: none; background: none; border: none; color: var(--dim);

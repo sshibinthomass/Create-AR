@@ -7,7 +7,8 @@ import {
   Environment, Grid, Html, Lightformer, OrbitControls, TransformControls, useGLTF,
 } from '@react-three/drei'
 import {
-  Box3, Box3Helper, Color, Euler, Matrix3, Matrix4, Object3D, Quaternion, Vector3,
+  Box3, Box3Helper, Color, Euler, Matrix3, Matrix4, MeshBasicMaterial, Object3D,
+  Quaternion, Vector3,
   type Group, type LineBasicMaterial, type Material, type Mesh,
 } from 'three'
 import { isRestyled, NO_EDIT, WHOLE, type Clip, type GizmoMode, type PartEdit } from '../api'
@@ -412,8 +413,8 @@ function SelectionBox({ parts, separation, pose, wrapper, player }: {
  * other way round. Real dimensions are reported in the stats panel.
  */
 function Model({
-  url, separation, showAllLabels, labels, edits, hidden, gizmo, selected, onSelect,
-  onEdit, onParts, clip, player, wholeModel,
+  url, separation, showAllLabels, labels, edits, hidden, ghost, gizmo, selected,
+  onSelect, onEdit, onParts, clip, player, wholeModel,
 }: {
   url: string
   separation: number
@@ -421,6 +422,7 @@ function Model({
   labels: Record<string, string>
   edits: Record<string, PartEdit>
   hidden: readonly string[]
+  ghost: readonly string[]
   gizmo: GizmoMode
   selected: readonly string[]
   onSelect: (name: string | null, additive: boolean) => void
@@ -535,33 +537,53 @@ function Model({
   // compiles a shader. Keying the effect below on the whole edit would recompile
   // one on every frame of a move or rotate drag, so it is keyed on the styling
   // alone -- which is why `edits` is read but not listed.
+  const wired = useMemo(() => new Set(ghost), [ghost])
   const styling = JSON.stringify(
     parts.map((p) => {
       const edit = edits[p.name]
       return edit && isRestyled(edit)
         ? [p.name, edit.material, edit.color, edit.recolor, edit.opacity, edit.roughness, edit.metalness]
-        : 0
+        : wired.has(p.name) ? 'wire' : 0
     }),
   )
 
   // Restyling stands materials in front of the part's own, so the originals are
   // put back when the edit goes away -- the glTF's own materials are shared with
   // whatever else the cache is handing this scene to.
+  const theme = useThemeValue()
   useEffect(() => {
     const restored = new Map<Mesh, Material | Material[]>()
     const built: Material[] = []
+    // One material for the lot: every ghosted part is drawn the same, and a
+    // wireframe per part would compile a shader per part.
+    let wire: Material | null = null
     for (const p of parts) {
       const edit = edits[p.name]
-      if (!edit || !isRestyled(edit)) continue
-      const { original, made } = restyleNode(p.node, edit)
-      for (const [mesh, material] of original) restored.set(mesh, material)
-      built.push(...made)
+      if (edit && isRestyled(edit)) {
+        const { original, made } = restyleNode(p.node, edit)
+        for (const [mesh, material] of original) restored.set(mesh, material)
+        built.push(...made)
+        continue
+      }
+      if (!wired.has(p.name)) continue
+      if (!wire) {
+        built.push(wire = new MeshBasicMaterial({
+          wireframe: true, color: new Color(cssColor('--dim')),
+          transparent: true, opacity: 0.7,
+        }))
+      }
+      p.node.traverse((child) => {
+        const mesh = child as Mesh
+        if (!mesh.isMesh) return
+        restored.set(mesh, mesh.material)
+        mesh.material = wire!
+      })
     }
     return () => {
       for (const [mesh, material] of restored) mesh.material = material
       for (const material of built) material.dispose()
     }
-  }, [parts, styling])
+  }, [parts, styling, theme])
 
   // Drop the cached parse when this preview is replaced, so repeated
   // conversions of the same job id never show a stale mesh.
@@ -775,6 +797,13 @@ interface Props {
   edits?: Record<string, PartEdit>
   /** Parts marked for deletion: taken out of the picture, left in the graph. */
   hidden?: readonly string[]
+  /**
+   * Parts to draw as a wireframe: the ones the analysis is leaving out.
+   *
+   * Drawn rather than hidden so you can see what is being left out and where
+   * it sits -- and click it, which is what puts it back in.
+   */
+  ghost?: readonly string[]
   /** Fired when a gizmo drag changes the marked parts. Enables the gizmo. */
   onEdit?: (changes: Record<string, PartEdit>) => void
   /** The picked part, by its original name: labelled and outlined. */
@@ -820,6 +849,14 @@ interface Props {
    * mark.
    */
   onMarkAll?: (on: boolean) => void
+  /**
+   * Fired when the model starts or stops filling the window.
+   *
+   * The viewer still owns the state -- Esc and its own button are what work it
+   * -- but a page that keeps panels beside the viewer has to hear about it, or
+   * filling the window buries them under a fixed overlay.
+   */
+  onFull?: (on: boolean) => void
   /** Whether the animation dock is open. Only meaningful with `onAnimate`. */
   animate?: boolean
   /**
@@ -831,6 +868,15 @@ interface Props {
    * Left out entirely when there is nothing to animate yet.
    */
   onAnimate?: (on: boolean) => void
+  /** Whether the viewer is showing only the parts that are not being skipped. */
+  onlyKept?: boolean
+  /**
+   * Hide the skipped parts, or bring the whole model back.
+   *
+   * Left out entirely where nothing is being skipped, so the button only
+   * appears once there is something for it to take away.
+   */
+  onOnlyKept?: (on: boolean) => void
   /**
    * A panel docked under the model rather than floating over it: the timeline.
    *
@@ -932,9 +978,11 @@ const GIZMOS: { mode: Exclude<GizmoMode, null>; label: string; icon: JSX.Element
 
 export default function ModelViewer({
   url, placeholder, explodeOpen = false, labels = NO_LABELS, edits = NO_EDITS,
-  hidden = NO_HIDDEN, selected = NO_SELECTION, onSelect, onEdit, onParts,
+  hidden = NO_HIDDEN, ghost = NO_HIDDEN, selected = NO_SELECTION, onSelect,
+  onEdit, onParts,
   clip = null, player = null, wholeModel = false, active = true, children, dock = null,
   animate = false, onAnimate, allMarked = false, onMarkAll,
+  onlyKept = false, onOnlyKept, onFull,
 }: Props) {
   const [open, setOpen] = useState(explodeOpen)
   const [pct, setPct] = useState(explodeOpen ? RESTING_PCT : 0)
@@ -1010,8 +1058,12 @@ export default function ModelViewer({
    * WebGL canvas is torn down and rebuilt around that -- which on a heavy
    * assembly is a visible stall every time, and loses the camera with it.
    * Escape leaves, because that is what every fullscreen view has taught.
+   *
+   * The page is told on the way in and out, and only on the way in and out --
+   * which is why `onFull` is called but not listed as a dependency.
    */
   useEffect(() => {
+    onFull?.(full)
     if (!full) return
     const leave = (e: KeyboardEvent) => { if (e.key === 'Escape') setFull(false) }
     const scroll = document.body.style.overflow
@@ -1073,6 +1125,7 @@ export default function ModelViewer({
                 labels={labels}
                 edits={edits}
                 hidden={hidden}
+                ghost={ghost}
                 gizmo={gizmo}
                 selected={selected}
                 onSelect={(name, additive) => onSelect?.(name, additive)}
@@ -1120,6 +1173,23 @@ export default function ModelViewer({
             </svg>
             Reset view
           </button>
+
+          {onOnlyKept && (
+            <button
+              className={`viewer-tool${onlyKept ? ' on' : ''}`}
+              title={onlyKept
+                ? 'Show every part again'
+                : 'Hide the skipped parts, leaving only the ones being analysed'}
+              onClick={() => onOnlyKept(!onlyKept)}
+            >
+              <svg width="14" height="14" viewBox="0 0 24 24" {...stroke}>
+                {onlyKept
+                  ? <path d="M3 3l18 18M10.6 5.2A9.3 9.3 0 0 1 12 5c5 0 9 4.5 9 7 0 .9-.5 2-1.4 3.1M6.4 6.6C3.9 8.2 3 10.2 3 12c0 2.5 4 7 9 7 1.6 0 3-.5 4.2-1.2" />
+                  : <><path d="M3 12s4-7 9-7 9 7 9 7-4 7-9 7-9-7-9-7Z" /><circle cx="12" cy="12" r="2.6" /></>}
+              </svg>
+              {onlyKept ? 'Showing kept parts' : 'Only kept parts'}
+            </button>
+          )}
 
           {onMarkAll && (
             <button

@@ -85,6 +85,19 @@ export default function AnalysisView({
   // Leave parts under this fraction of the model's longest side alone, as a
   // percentage. Seeded from the saved setting; the slider decides per run.
   const [floor, setFloor] = useState(0)
+  // Show only the parts the floor is keeping, so the model in the viewer is
+  // the model the agent will be reading.
+  const [onlyKept, setOnlyKept] = useState(false)
+  // Whether the viewer is filling the window, and whether the panels beside it
+  // have been folded away. The viewer owns the first and tells us; filling the
+  // window would otherwise bury the parts list under a fixed overlay.
+  const [full, setFull] = useState(false)
+  const [railOpen, setRailOpen] = useState(true)
+  const [animOpen, setAnimOpen] = useState(true)
+  // Parts the floor or the artefact rule leaves out that the user has put back
+  // in by hand, by their name in the file -- keyed like every other override
+  // here, and sent with the run so the agent honours it too.
+  const [included, setIncluded] = useState<string[]>([])
   const [selected, setSelected] = useState<string[]>([])
   // The part opened full size in its own dialog, by its name in the file.
   const [opened, setOpened] = useState<string | null>(null)
@@ -592,7 +605,58 @@ export default function AnalysisView({
     return { artefacts, under }
   }, [parts, sizes, floor])
 
-  const analysed = parts.length - artefacts.size - under.size
+  /**
+   * What the run is actually leaving out, once the puts-back are taken off.
+   *
+   * `artefacts` and `under` stay the raw verdict on the geometry, because that
+   * is what decides whether a row is offered the button at all -- a part put
+   * back in has to keep offering the way out again.
+   */
+  const { left, leftNames } = useMemo(() => {
+    const back = new Set(included)
+    const left = new Set<number>()
+    for (const i of [...artefacts, ...under]) {
+      if (!back.has(parts[i])) left.add(i)
+    }
+    return { left, leftNames: new Set([...left].map((i) => parts[i])) }
+  }, [parts, artefacts, under, included])
+
+  const analysed = parts.length - left.size
+  const leftArtefacts = [...left].filter((i) => artefacts.has(i)).length
+  const leftUnder = left.size - leftArtefacts
+
+  // The left-out parts as names, which is what the viewer draws and hides
+  // parts by. The removed ones go with them: both are parts you asked not to
+  // see, and a removed part is not coming back as a wireframe.
+  const ghost = useMemo(
+    () => [...leftNames].filter((n) => !gone.has(n)),
+    [leftNames, gone],
+  )
+  const unshown = useMemo(
+    () => (onlyKept ? [...removed, ...ghost] : removed),
+    [onlyKept, removed, ghost],
+  )
+  const skipping = left.size > 0
+
+  /** Analyse this part after all, or leave it out again. */
+  const include = useCallback((name: string) => {
+    setIncluded((was) => (was.includes(name)
+      ? was.filter((n) => n !== name)
+      : [...was, name]))
+  }, [])
+
+  /**
+   * A click in the viewer, where the wireframe is the affordance.
+   *
+   * Clicking a part the run is leaving out puts it back in: the wireframe is
+   * there to say "this one is being skipped", so the click on it has to be
+   * what unsays that. Marking it as well, because a click in the viewer is
+   * also how you pick a part, and losing that would be a surprise.
+   */
+  const pick = useCallback((name: string | null, additive: boolean) => {
+    if (name !== null && leftNames.has(name) && !gone.has(name)) include(name)
+    mark(name, additive)
+  }, [leftNames, gone, include, mark])
 
   // Either namer counts as busy; the buttons and the bar do not care which.
   const naming = namer.busy || agent.busy
@@ -604,7 +668,10 @@ export default function AnalysisView({
     if (!preview || !settings) return
     // Both namers write back the same way; they differ in how they arrive at
     // the answers. See useAgent.ts and backend/app/agent.py for the difference.
-    if (settings.agent) agent.run(preview, parts, floor, fold)
+    if (settings.agent) {
+      const keep = parts.flatMap((n, i) => (included.includes(n) ? [i] : []))
+      agent.run(preview, parts, floor, keep, fold)
+    }
     else namer.run(preview, parts, settings, fold)
   }
 
@@ -642,7 +709,7 @@ export default function AnalysisView({
   }
 
   return (
-    <div className="analysis">
+    <div className={`analysis${full && animate && animOpen ? ' anim-rail' : ''}`}>
       {/* Loading the model spans the width; the parts and the viewer share the
           room below it, which is where the work actually happens. */}
       <section className="card source">
@@ -705,7 +772,8 @@ export default function AnalysisView({
 
       {analysis.error && <div className="error-box source">{analysis.error}</div>}
 
-      <div className="col">
+      <div className={`col${full ? ' rail' : ''}${full && !railOpen ? ' shut' : ''}${
+        full && !animOpen ? ' anim-shut' : ''}`}>
         {parts.length > 0 && (
           <section className="card">
             <div className="card-head">
@@ -798,9 +866,11 @@ export default function AnalysisView({
                     </>
                   )}
                   <strong>{analysed}</strong> of {parts.length} parts analysed
-                  {under.size > 0 && `, ${under.size} left alone`}
-                  {artefacts.size > 0
-                    && `, ${artefacts.size} artefact${artefacts.size > 1 ? 's' : ''}`}.
+                  {leftUnder > 0 && `, ${leftUnder} left alone`}
+                  {leftArtefacts > 0
+                    && `, ${leftArtefacts} artefact${leftArtefacts > 1 ? 's' : ''}`}.
+                  {included.length > 0
+                    && ` ${included.length} put back in by hand.`}
                   {' '}Excluded parts keep the name the file gave them.
                 </div>
               </div>
@@ -862,12 +932,12 @@ export default function AnalysisView({
                   key={`${name}-${i}`}
                   className={`part-row${selected.includes(name) ? ' on' : ''}${
                     gone.has(name) ? ' gone' : ''}${
-                    artefacts.has(i) ? ' artefact' : under.has(i) ? ' under' : ''}`}
-                  title={artefacts.has(i)
-                    ? 'One face, no volume: a modelling artefact. Always left alone.'
-                    : under.has(i)
-                      ? 'Below the size floor, so it will keep its file name.'
-                      : undefined}
+                    !left.has(i) ? '' : artefacts.has(i) ? ' artefact' : ' under'}`}
+                  title={!left.has(i)
+                    ? undefined
+                    : artefacts.has(i)
+                      ? 'One face, no volume: a modelling artefact. Left alone.'
+                      : 'Below the size floor, so it will keep its file name.'}
                   onClick={(e) => {
                     if (gone.has(name)) return
                     mark(name, e.shiftKey || e.ctrlKey || e.metaKey)
@@ -893,6 +963,17 @@ export default function AnalysisView({
                   )}
                   {keyed.has(name) && !gone.has(name) && (
                     <span className="part-keyed" title="This part has keyframes in the current animation">◆</span>
+                  )}
+                  {(artefacts.has(i) || under.has(i)) && !gone.has(name) && (
+                    <button
+                      className="part-keep"
+                      title={left.has(i)
+                        ? 'Analyse this part after all'
+                        : 'Leave this part out of the analysis again'}
+                      onClick={(e) => { e.stopPropagation(); include(name) }}
+                    >
+                      {left.has(i) ? '+' : '−'}
+                    </button>
                   )}
                   {renames[name] !== undefined && !gone.has(name) && (
                     <button
@@ -1068,7 +1149,7 @@ export default function AnalysisView({
         )}
 
         {parts.length > 0 && (
-          <section className="card">
+          <section className="card anim">
             <div className="card-head">
               <h2>Animation</h2>
               {!animate && clips.some((c) => c.tracks.length) && (
@@ -1191,6 +1272,30 @@ export default function AnalysisView({
         )}
       </div>
 
+      {/* Outside the rail on purpose: a handle inside it would fold away with
+          it, and there would be no way back. */}
+      {full && parts.length > 0 && (
+        <button
+          className={`rail-handle${railOpen ? ' open' : ''}`}
+          title={railOpen ? 'Fold the panels away' : 'Bring the panels back'}
+          onClick={() => setRailOpen((was) => !was)}
+        >
+          {railOpen ? '‹' : '›'}
+          <span>Panels</span>
+        </button>
+      )}
+
+      {full && animate && parts.length > 0 && (
+        <button
+          className={`rail-handle anim-handle${animOpen ? ' open' : ''}`}
+          title={animOpen ? 'Fold the animation panel away' : 'Bring it back'}
+          onClick={() => setAnimOpen((was) => !was)}
+        >
+          <span>Animation</span>
+          {animOpen ? '›' : '‹'}
+        </button>
+      )}
+
       <div className="col">
         <section className="card viewer-card">
           <Suspense fallback={<div className="viewer"><div className="viewer-empty">Loading viewer…</div></div>}>
@@ -1200,9 +1305,10 @@ export default function AnalysisView({
               explodeOpen
               labels={renames}
               edits={edits}
-              hidden={removed}
+              hidden={unshown}
+              ghost={ghost}
               selected={selected}
-              onSelect={mark}
+              onSelect={pick}
               onEdit={onGizmo}
               onParts={onParts}
               clip={clip}
@@ -1216,6 +1322,11 @@ export default function AnalysisView({
               allMarked={allMarked}
               // Nothing to mark until the model has turned out to have parts.
               onMarkAll={living.length > 0 ? markAll : undefined}
+              onlyKept={onlyKept}
+              // Only where the floor is in play and something is actually
+              // being skipped: otherwise the button would hide nothing.
+              onOnlyKept={settings?.agent && skipping ? setOnlyKept : undefined}
+              onFull={setFull}
               dock={clip && (
                 <Timeline
                   clip={clip}
