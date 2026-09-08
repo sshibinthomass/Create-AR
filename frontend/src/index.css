@@ -437,6 +437,13 @@ button:disabled { cursor: not-allowed; }
    from in front of the model when the window is filled. */
 .analysis.anim-rail .viewer.full .viewer-bottom { align-items: center; }
 
+/* The rails are fixed over the same corners the part card and the transform
+   readout already float in, and sit above them -- so with a rail open in full
+   screen those panels were hidden under it rather than beside it. Pushed clear
+   by the rail's own width, the way the fold handles already stand outside it. */
+.analysis.parts-rail .viewer.full .part-card { left: calc(var(--rail) + 26px); }
+.analysis.anim-open .viewer.full .viewer-side { right: calc(var(--rail) + 26px); }
+
 .rail-handle {
   position: fixed; z-index: 102; top: 56px; left: calc(var(--rail) + 26px);
   display: flex; align-items: center; gap: 6px;
@@ -693,6 +700,11 @@ input[type='range'] { width: 110px; accent-color: var(--accent); }
 }
 .viewer-tool:hover { color: var(--text); border-color: var(--line-strong); }
 .viewer-tool.on { color: var(--accent); border-color: var(--accent); background: color-mix(in srgb, var(--accent) 14%, transparent); }
+
+/* The three shading modes, as their own small cluster rather than one more
+   full-width tool: there is nothing to read, only one of three to pick. */
+.shade-group { display: flex; gap: 4px; }
+.shade-btn { padding: 6px 8px; }
 
 /* Filling the window: a fixed overlay, so the canvas is never re-created and
    the camera survives the change. Beats the per-tab height rules by coming

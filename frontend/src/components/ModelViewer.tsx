@@ -404,6 +404,13 @@ function SelectionBox({ parts, separation, pose, wrapper, player }: {
 }
 
 /**
+ * How the model's surfaces are drawn: shaded solid, as edges only, or
+ * see-through. A viewer preference, not part of what gets saved -- the same
+ * reason the ghost wireframe for skipped parts never touches `edits`.
+ */
+export type ShadeMode = 'solid' | 'wireframe' | 'xray'
+
+/**
  * Renders the model normalised to roughly one world unit.
  *
  * Converted models arrive at wildly different scales -- a CAD bracket is 0.06 m
@@ -414,7 +421,7 @@ function SelectionBox({ parts, separation, pose, wrapper, player }: {
  */
 function Model({
   url, separation, showAllLabels, labels, edits, hidden, ghost, gizmo, selected,
-  onSelect, onEdit, onParts, clip, player, wholeModel,
+  onSelect, onEdit, onParts, clip, player, wholeModel, shade,
 }: {
   url: string
   separation: number
@@ -432,6 +439,7 @@ function Model({
   clip: Clip | null
   player: Player | null
   wholeModel: boolean
+  shade: ShadeMode
 }) {
   const { scene, parser } = useGLTF(url)
   const wrapper = useRef<Group>(null)
@@ -557,6 +565,42 @@ function Model({
     // One material for the lot: every ghosted part is drawn the same, and a
     // wireframe per part would compile a shader per part.
     let wire: Material | null = null
+    let xray: Material | null = null
+
+    // A shade mode is a way of looking at the whole model, not a part's own
+    // styling -- it overrides an edit's material the same way it overrides the
+    // file's own, and takes every part, not only the ones being ghosted.
+    if (shade !== 'solid') {
+      for (const p of parts) {
+        p.node.traverse((child) => {
+          const mesh = child as Mesh
+          if (!mesh.isMesh) return
+          restored.set(mesh, mesh.material)
+          if (shade === 'wireframe') {
+            if (!wire) {
+              built.push(wire = new MeshBasicMaterial({
+                wireframe: true, color: new Color(cssColor('--text')),
+                transparent: true, opacity: 0.85,
+              }))
+            }
+            mesh.material = wire
+          } else {
+            if (!xray) {
+              built.push(xray = new MeshBasicMaterial({
+                color: new Color(cssColor('--accent')), transparent: true,
+                opacity: 0.15, depthWrite: false,
+              }))
+            }
+            mesh.material = xray
+          }
+        })
+      }
+      return () => {
+        for (const [mesh, material] of restored) mesh.material = material
+        for (const material of built) material.dispose()
+      }
+    }
+
     for (const p of parts) {
       const edit = edits[p.name]
       if (edit && isRestyled(edit)) {
@@ -583,7 +627,7 @@ function Model({
       for (const [mesh, material] of restored) mesh.material = material
       for (const material of built) material.dispose()
     }
-  }, [parts, styling, theme])
+  }, [parts, styling, theme, shade])
 
   // Drop the cached parse when this preview is replaced, so repeated
   // conversions of the same job id never show a stale mesh.
@@ -976,6 +1020,29 @@ const GIZMOS: { mode: Exclude<GizmoMode, null>; label: string; icon: JSX.Element
   },
 ]
 
+const SHADE_MODES: ShadeMode[] = ['solid', 'wireframe', 'xray']
+const SHADE_LABEL: Record<ShadeMode, string> = {
+  solid: 'Solid', wireframe: 'Wireframe', xray: 'X-ray',
+}
+const SHADE_ICON: Record<ShadeMode, JSX.Element> = {
+  solid: (
+    <svg width="13" height="13" viewBox="0 0 24 24" {...stroke}>
+      <rect x="4" y="4" width="16" height="16" rx="1.5" fill="currentColor" stroke="none" />
+    </svg>
+  ),
+  wireframe: (
+    <svg width="13" height="13" viewBox="0 0 24 24" {...stroke}>
+      <rect x="4" y="4" width="16" height="16" rx="1.5" />
+      <path d="M4 4l16 16M4 20 20 4" />
+    </svg>
+  ),
+  xray: (
+    <svg width="13" height="13" viewBox="0 0 24 24" {...stroke}>
+      <rect x="4" y="4" width="16" height="16" rx="1.5" strokeDasharray="3 3" />
+    </svg>
+  ),
+}
+
 export default function ModelViewer({
   url, placeholder, explodeOpen = false, labels = NO_LABELS, edits = NO_EDITS,
   hidden = NO_HIDDEN, ghost = NO_HIDDEN, selected = NO_SELECTION, onSelect,
@@ -990,6 +1057,7 @@ export default function ModelViewer({
   const [parts, setParts] = useState(0)
   const [gizmo, setGizmo] = useState<GizmoMode>(null)
   const [full, setFull] = useState(false)
+  const [shade, setShade] = useState<ShadeMode>('solid')
   // WebGL paints its own ground, so the tokens are read back out rather than
   // inherited. Re-read whenever the theme moves.
   const theme = useThemeValue()
@@ -1134,6 +1202,7 @@ export default function ModelViewer({
                 clip={clip}
                 player={player}
                 wholeModel={wholeModel}
+                shade={shade}
               />
             </Suspense>
 
@@ -1173,6 +1242,20 @@ export default function ModelViewer({
             </svg>
             Reset view
           </button>
+
+          <div className="shade-group">
+            {SHADE_MODES.map((mode) => (
+              <button
+                key={mode}
+                className={`viewer-tool shade-btn${shade === mode ? ' on' : ''}`}
+                title={SHADE_LABEL[mode]}
+                aria-label={SHADE_LABEL[mode]}
+                onClick={() => setShade(mode)}
+              >
+                {SHADE_ICON[mode]}
+              </button>
+            ))}
+          </div>
 
           {onOnlyKept && (
             <button

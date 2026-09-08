@@ -709,7 +709,8 @@ export default function AnalysisView({
   }
 
   return (
-    <div className={`analysis${full && animate && animOpen ? ' anim-rail' : ''}`}>
+    <div className={`analysis${full && animate && animOpen ? ' anim-rail' : ''}${
+      full && railOpen ? ' parts-rail' : ''}${full && animOpen ? ' anim-open' : ''}`}>
       {/* Loading the model spans the width; the parts and the viewer share the
           room below it, which is where the work actually happens. */}
       <section className="card source">
@@ -1148,7 +1149,7 @@ export default function AnalysisView({
           </section>
         )}
 
-        {parts.length > 0 && (
+        {parts.length > 0 && !(full && !animate) && (
           <section className="card anim">
             <div className="card-head">
               <h2>Animation</h2>
