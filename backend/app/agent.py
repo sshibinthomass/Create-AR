@@ -47,6 +47,7 @@ import time
 import uuid
 from collections.abc import Iterable
 
+from langfuse import propagate_attributes
 from pydantic import BaseModel, Field
 
 from . import naming, parts_doc
@@ -605,8 +606,9 @@ def _identify(session: Session, seen: dict[str, str]) -> None:
                     '"confidence": "high", "evidence": "..."}.'})
         return out
 
-    found = _body(naming.ask(
-        AGENT_RULES, blocks, _identify_schema(), 700, session.settings))
+    with propagate_attributes(session_id=session.id):
+        found = _body(naming.ask(
+            AGENT_RULES, blocks, _identify_schema(), 700, session.settings))
 
     session.subject = " ".join(str(found.get("subject", "")).split())[:200]
     session.family = " ".join(str(found.get("family", "")).split())[:80]
@@ -679,10 +681,11 @@ def _name_batch(session: Session, seen: dict[str, str]) -> list[dict]:
         return out
 
     budget = 300 + (1100 if session.settings.describe else 220) * max(len(ids), 1)
-    found = _body(naming.ask(
-        f"{AGENT_RULES}\n\n{session.settings.describe_instructions}"
-        if session.settings.describe else AGENT_RULES,
-        blocks, _name_schema(session.settings.describe), budget, session.settings))
+    with propagate_attributes(session_id=session.id):
+        found = _body(naming.ask(
+            f"{AGENT_RULES}\n\n{session.settings.describe_instructions}"
+            if session.settings.describe else AGENT_RULES,
+            blocks, _name_schema(session.settings.describe), budget, session.settings))
 
     wanted = set(ids)
     named = []

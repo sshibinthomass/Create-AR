@@ -36,6 +36,13 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+
+@app.on_event("shutdown")
+def _flush_langfuse() -> None:
+    """Traces are batched; without this the last few are lost on exit."""
+    from langfuse import get_client
+    get_client().flush()
+
 CHUNK = 1024 * 1024
 MAX_RENAMES = 500
 MAX_EDITS = 500

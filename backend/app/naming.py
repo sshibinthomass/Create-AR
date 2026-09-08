@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 
+from langfuse import get_client, observe
 from pydantic import BaseModel, Field
 
 from . import parts_doc
@@ -67,6 +68,15 @@ def _image(data: str) -> dict:
 def _anthropic_image(data: str) -> dict:
     return {"type": "image",
             "source": {"type": "base64", "media_type": "image/jpeg", "data": data}}
+
+
+def _redacted_image(data: str) -> dict:
+    """Stands in for an image when a prompt is logged to Langfuse.
+
+    The picture itself is neither secret nor useful in a trace -- only its
+    size is, to tell a chunk that sent too little from one that sent plenty.
+    """
+    return {"type": "image", "omitted": f"{len(data)} base64 chars"}
 
 
 # The description block, shared with the agent's own schema in agent.py. A list
@@ -270,7 +280,7 @@ def _quirk_for(exc: Exception) -> str | None:
 
 
 def _ask_openai(system: str, blocks: list[dict], max_tokens: int,
-                settings: Settings) -> str | None:
+                settings: Settings) -> tuple[str | None, dict, str]:
     """Azure OpenAI, OpenAI itself, or anything wearing the same API."""
     # Imported inside the call rather than at module scope so the rest of the
     # service -- and its tests -- still run without the SDK installed.
@@ -324,12 +334,17 @@ def _ask_openai(system: str, blocks: list[dict], max_tokens: int,
                 raise NamingError(_refusal(exc)[2]) from exc
             known.add(quirk)
             continue
-        return reply.choices[0].message.content
+        usage = getattr(reply, "usage", None)
+        usage_details = ({"prompt_tokens": usage.prompt_tokens,
+                          "completion_tokens": usage.completion_tokens}
+                         if usage else {})
+        return (reply.choices[0].message.content, usage_details,
+               getattr(reply, "model", None) or settings.model())
     raise NamingError("The model kept refusing the request parameters.")
 
 
 def _ask_anthropic(system: str, blocks: list[dict], schema: dict, max_tokens: int,
-                   effort: str | None, settings: Settings) -> str | None:
+                   effort: str | None, settings: Settings) -> tuple[str | None, dict, str]:
     """Claude, whose images, system prompt and JSON contract all differ."""
     try:
         import anthropic
@@ -360,9 +375,15 @@ def _ask_anthropic(system: str, blocks: list[dict], schema: dict, max_tokens: in
 
     if reply.stop_reason == "refusal":
         raise NamingError("The model declined to answer.")
-    return next((b.text for b in reply.content if b.type == "text"), None)
+    usage = getattr(reply, "usage", None)
+    usage_details = ({"prompt_tokens": usage.input_tokens,
+                      "completion_tokens": usage.output_tokens}
+                     if usage else {})
+    text = next((b.text for b in reply.content if b.type == "text"), None)
+    return text, usage_details, getattr(reply, "model", None) or settings.anthropic_model
 
 
+@observe(as_type="generation", name="name-part", capture_input=False, capture_output=False)
 def ask(system: str, blocks, schema: dict, max_tokens: int, settings: Settings,
         effort: str | None = None) -> str | None:
     """One request to whichever provider is selected. Returns the raw reply.
@@ -374,11 +395,26 @@ def ask(system: str, blocks, schema: dict, max_tokens: int, settings: Settings,
 
     ``schema`` is enforced by Anthropic and ignored by the OpenAI-shaped
     providers, which are only asked for an object; see ``reply_schema``.
+
+    Every call is traced to Langfuse. Input is built here rather than left to
+    the decorator's default, because the default would log ``settings`` --
+    which carries the provider's API key -- verbatim into the trace. A caller
+    that wants several calls grouped into one Langfuse session (agent.py's
+    naming runs) wraps the call in ``langfuse.propagate_attributes``.
     """
     if settings.provider == "anthropic":
-        return _ask_anthropic(system, blocks(_anthropic_image), schema,
-                              max_tokens, effort, settings)
-    return _ask_openai(system, blocks(_image), max_tokens, settings)
+        text, usage, model = _ask_anthropic(system, blocks(_anthropic_image), schema,
+                                            max_tokens, effort, settings)
+    else:
+        text, usage, model = _ask_openai(system, blocks(_image), max_tokens, settings)
+
+    get_client().update_current_generation(
+        model=model,
+        input={"system": system, "messages": blocks(_redacted_image)},
+        output=text,
+        usage_details=usage,
+    )
+    return text
 
 
 def instructions_for(req: NameRequest, settings: Settings) -> str:

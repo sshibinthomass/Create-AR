@@ -934,10 +934,16 @@ What is **not** handled, and should be before exposing this publicly:
 | `AZURE_OPENAI_API_KEY` | unset | Likewise. Saved settings win from then on. |
 | `AZURE_OPENAI_DEPLOYMENT` | unset | Must accept images. |
 | `AZURE_OPENAI_API_VERSION` | `2024-10-21` | |
+| `LANGFUSE_PUBLIC_KEY` | unset | Traces every part-naming call to Langfuse. Unset disables tracing. |
+| `LANGFUSE_SECRET_KEY` | unset | Likewise. |
+| `LANGFUSE_BASE_URL` | `https://cloud.langfuse.com` | Point at a self-hosted instance. |
 
 Keys for the other three providers are typed on the settings page; see
 [Settings](#settings) for why `OPENAI_API_KEY` and `ANTHROPIC_API_KEY` are
 not read from the environment.
+
+These, and any other variable in this table, can also be put in a `.env` file
+at the repo root -- gitignored, loaded on startup.
 
 Discovery deliberately skips the Windows `WindowsApps\blender.CMD` alias: it
 shells out to the detached GUI launcher, which never returns output to a

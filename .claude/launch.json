@@ -5,7 +5,13 @@
       "name": "frontend",
       "runtimeExecutable": "npm",
       "runtimeArgs": ["run", "dev", "--prefix", "frontend"],
-      "port": 5180
+      "port": 5181
+    },
+    {
+      "name": "backend",
+      "runtimeExecutable": ".venv/Scripts/python.exe",
+      "runtimeArgs": ["-m", "uvicorn", "app.main:app", "--app-dir", "backend", "--port", "8081"],
+      "port": 8081
     }
   ]
 }
