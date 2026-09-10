@@ -30,3 +30,10 @@ samples/__pycache__/
 # Claude Code worktrees live under .claude/ in the main checkout, and are
 # machine-local copies of this repo -- never commit them.
 .claude/worktrees/
+
+# graphify build outputs. graph.json/graph.html and the extraction cache are
+# large and regenerable (`/graphify --update`), and .graphify_python and
+# .graphify_root hold absolute paths from whichever machine built them. The
+# report is the one part worth reading in review, so it stays.
+graphify-out/*
+!graphify-out/GRAPH_REPORT.md
